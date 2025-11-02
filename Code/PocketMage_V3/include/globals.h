@@ -43,6 +43,26 @@ extern std::vector<std::vector<String>> tasks;  // Task list
 enum HOMEState { HOME_HOME, NOWLATER };         // Home app states
 extern HOMEState CurrentHOMEState;              // Current home state
 
+// ===================== PocketMage APP PROTOTYPES =====================
+// <APP.cpp>
+void APP_INIT();
+void processKB_APP();
+void einkHandler_APP();
+
+//utils.cpp
+void printDebug();
+void checkTimeout();
+void loadState(bool changeState = true);
+void updateBattState();
+void saveEditingFile(); // OTA_APP: Remove saveEditingFile
+
+// <PocketMage>
+void einkHandler(void *parameter);
+void applicationEinkHandler();
+void processKB();
+
+
+// OTA_APP: Remove all pocketmage v3 prototypes below this line
 // <FILEWIZ.cpp>
 void FILEWIZ_INIT();
 void processKB_FILEWIZ();
@@ -101,24 +121,5 @@ void processKB_APPLOADER();
 void einkHandler_APPLOADER();
 void rebootToAppSlot(int otaIndex);
 void loadAndDrawAppIcon(int x, int y, int otaIndex, bool showName = true, int maxNameChars = 10);
-
-// <APP.cpp>
-void APP_INIT();
-void processKB_APP();
-void einkHandler_APP();
-
-//utils.cpp
-void printDebug();
-void checkTimeout();
-void loadState(bool changeState = true);
-void updateBattState();
-void saveEditingFile();
-
-// <PocketMage>
-void einkHandler(void *parameter);
-void applicationEinkHandler();
-void processKB();
-
-
 
 #endif // GLOBALS_H

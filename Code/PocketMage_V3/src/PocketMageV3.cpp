@@ -21,7 +21,7 @@ void applicationEinkHandler() {
     einkHandler_APP();
     return;
   }
-
+  // OTA_APP: Remove switch statement
   switch (CurrentAppState) {
     case HOME:
       einkHandler_HOME();
@@ -88,7 +88,7 @@ void processKB() {
     //processKB_APP();
     return;
   }
-
+  // OTA_APP: Remove switch statement
   switch (CurrentAppState) {
     case HOME:
       processKB_HOME();

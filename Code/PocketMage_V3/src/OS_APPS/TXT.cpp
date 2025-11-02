@@ -16,6 +16,7 @@ String prevEditingFile = "";
 static String currentLine = "";
 static volatile bool doFull = false;
 
+
 void TXT_INIT_OLD() {
   if (SD().getEditingFile() != "") pocketmage::file::loadFile();
   CurrentAppState = TXT;

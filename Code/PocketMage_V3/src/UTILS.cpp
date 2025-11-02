@@ -44,7 +44,7 @@ void checkTimeout() {
             return;
             }
         }
-
+        // OTA_APP: Remove saveEditingFile
         // Save current work
         saveEditingFile();
 
@@ -95,6 +95,7 @@ void checkTimeout() {
     if (PWR_BTN_event && CurrentHOMEState != NOWLATER) {
         PWR_BTN_event = false;
 
+        // OTA_APP: Remove saveEditingFile
         // Save current work
         saveEditingFile();
 
@@ -197,9 +198,13 @@ void loadState(bool changeState) {
     OTA3_APP = prefs.getString("OTA3", "-");
     OTA4_APP = prefs.getString("OTA4", "-");
 
-
+    if (!changeState) {
+        prefs.end();
+        return;
+    }
+    // OTA_APP: removed if statement
     // Update State (if needed)
-    if (changeState && !OTA_APP) {
+    if (!OTA_APP) {
         u8g2.setContrast(OLED_BRIGHTNESS);
 
         if (HOME_ON_BOOT)
@@ -270,14 +275,9 @@ void updateBattState() {
                 OLED().oledWord("Battery Critial!");
                 delay(1000);
 
+                // OTA_APP: Remove saveEditingFile
                 // Save current work
-                OLED().oledWord("Saving Work");
-                //pocketmage::file::saveFile();
-                String savePath = SD().getEditingFile();
-                if (savePath != "" && savePath != "-" && savePath != "/temp.txt" && fileLoaded) {
-                    if (!savePath.startsWith("/")) savePath = "/" + savePath;
-                    saveMarkdownFile(SD().getEditingFile());
-                }
+                saveEditingFile();
 
                 // Put device to sleep
                 pocketmage::power::deepSleep(false);
@@ -307,8 +307,10 @@ void updateBattState() {
     prevVoltage = filteredVoltage;
 }
 
+// OTA_APP: Remove definition of saveEditingFile
 void saveEditingFile() {
     if (!OTA_APP){
+        OLED().oledWord("Saving Work");
         //pocketmage::file::saveFile();
         String savePath = SD().getEditingFile();
         if (savePath != "" && savePath != "-" && savePath != "/temp.txt" && fileLoaded) {
