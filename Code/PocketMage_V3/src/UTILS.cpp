@@ -97,15 +97,15 @@ void checkTimeout() {
         #if !OTA_APP
         saveEditingFile();
         #endif
-        ESP_LOGE(TAG,"After saveEditingFile");
+
         if (digitalRead(CHRG_SENS) == HIGH && !OTA_APP) {
         // Save last state
-        ESP_LOGE(TAG,"Charge sense high");
+
         prefs.begin("PocketMage", false);
         prefs.putInt("CurrentAppState", static_cast<int>(CurrentAppState));
         prefs.putString("editingFile", SD().getEditingFile());
         prefs.end();
-        ESP_LOGE(TAG,"finished adding prefs");    
+
         CurrentAppState = HOME;
         CurrentHOMEState = NOWLATER;
         //OTA_APP: remove updateTaskArray and sortTasksByDueDate
@@ -123,7 +123,7 @@ void checkTimeout() {
         // Clear screen
         display.setFullWindow();
         display.fillScreen(GxEPD_WHITE);
-        ESP_LOGE(TAG,"cleared screen");   
+
         } else {
             ESP_LOGE(TAG,"Not charging");
             switch (CurrentAppState) {
@@ -150,11 +150,9 @@ void checkTimeout() {
                 }
                 // Sleep device normally
                 else
-                    ESP_LOGE(TAG,"sleeping normal 1");  
                     pocketmage::deepSleep();
                 break;
                 default:
-                    ESP_LOGE(TAG,"sleeping normal 2"); 
                     pocketmage::deepSleep();
                 break;
             }

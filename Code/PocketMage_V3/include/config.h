@@ -4,9 +4,9 @@
 // OTA App
 // Is this an OTA APP? // OTA_APP: set -DOTA_APP_FLAG=1 in platformio.ini
 #if OTA_APP_FLAG
-const bool OTA_APP = true;
+#define OTA_APP true
 #else
-const bool OTA_APP = false;
+#define OTA_APP false
 #endif
 
 // CONFIGURATION & SETTINGS

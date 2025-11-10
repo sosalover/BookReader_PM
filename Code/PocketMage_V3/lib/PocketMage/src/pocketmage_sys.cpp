@@ -67,7 +67,6 @@ namespace pocketmage {
         }
 
         if (isValid) {
-            ESP_LOGE(TAG, "CPU Speed changed to: %d MHz", newFreq);
             setCpuFrequencyMhz(newFreq);
             ESP_LOGE(TAG, "CPU Speed changed to: %d MHz", newFreq);
         }

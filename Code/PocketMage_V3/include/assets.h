@@ -1,10 +1,10 @@
-#if !OTA_APP // POCKETMAGE_OS
+
 #ifndef ASSETS_H
 #define ASSETS_H
 
 #include <pgmspace.h>
 
-
+#if !OTA_APP // POCKETMAGE_OS
 //
 extern const unsigned char backgroundaero [] PROGMEM;
 extern const unsigned char backgroundbliss [] PROGMEM;
