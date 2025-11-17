@@ -1,0 +1,201 @@
+name: Build & publish web flasher assets (WIP)
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+jobs:
+  build_and_deploy:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Code/PocketMage_V3
+
+    steps:
+      - name: Conjure the Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prepare Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install PlatformIO + esptool + jq
+        run: |
+          set -euo pipefail
+          pip install -U platformio
+          pip install esptool
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Build firmware
+        run: |
+          set -euo pipefail
+          pio run -e PM_V3
+          ls -l .pio/build/PM_V3
+
+      - name: Create merged-firmware.bin
+        id: merge
+        run: |
+          set -euo pipefail
+          BUILD_DIR=".pio/build/PM_V3"
+          cd "$BUILD_DIR"
+          # prefer known filenames; adjust if PlatformIO emits different names
+          if [ -f bootloader.bin ] && [ -f partitions.bin ] && [ -f firmware.bin ]; then
+            if [ -f boot_app0.bin ]; then
+              esptool --chip esp32 merge_bin \
+                -o merged-firmware.bin \
+                --flash_mode dio \
+                --flash_freq 40m \
+                --flash_size 16MB \
+                0x1000 bootloader.bin \
+                0x8000 partitions.bin \
+                0xe000 boot_app0.bin \
+                0x10000 firmware.bin
+            else
+              esptool --chip esp32 merge_bin \
+                -o merged-firmware.bin \
+                --flash_mode dio \
+                --flash_freq 40m \
+                --flash_size 16MB \
+                0x1000 bootloader.bin \
+                0x8000 partitions.bin \
+                0x10000 firmware.bin
+            fi
+            echo "Merged binary created."
+          else
+            echo "Missing expected bin parts for merge. Aborting."
+            exit 1
+          fi
+          cd - >/dev/null
+
+      - name: Prepare docs folder with manifest and firmware (both full and app-only)
+        run: |
+          set -euo pipefail
+          RELEASE_TAG="${{ github.event.release.tag_name }}"
+          TARGET_DIR="docs/firmware/${RELEASE_TAG}"
+          mkdir -p "${TARGET_DIR}"
+          # copy both the merged full image and the app-only firmware (firmware.bin)
+          cp .pio/build/PM_V3/merged-firmware.bin "${TARGET_DIR}/merged-firmware.bin"
+          cp .pio/build/PM_V3/firmware.bin "${TARGET_DIR}/firmware.bin"
+
+          # Create full manifest (merged image) using jq to avoid any YAML/heredoc issues.
+          jq -n --arg ver "$RELEASE_TAG" '{
+            name: "PocketMage",
+            version: $ver,
+            home_assistant_domain: "",
+            new_install_prompt_erase: true,
+            builds: [
+              {
+                chipFamily: "ESP32-S3",
+                parts: [
+                  { path: "merged-firmware.bin", offset: 0 }
+                ]
+              }
+            ]
+          }' > "${TARGET_DIR}/manifest.json"
+
+          # Create an app-only manifest that writes only the application partition (no partition table overwrite).
+          # This preserves NVS / data partitions and will not force an erase.
+          jq -n --arg ver "$RELEASE_TAG" '{
+            name: "PocketMage",
+            version: $ver,
+            home_assistant_domain: "",
+            new_install_prompt_erase: false,
+            builds: [
+              {
+                chipFamily: "ESP32-S3",
+                parts: [
+                  { path: "firmware.bin", offset: 65536 }
+                ]
+              }
+            ]
+          }' > "${TARGET_DIR}/manifest_no_erase.json"
+
+          # update a simple manifest-index using jq (adds tag if missing and keeps sorted unique list)
+          mkdir -p docs
+          INDEX_FILE=docs/manifest-index.json
+          if [ -f "${INDEX_FILE}" ]; then
+            tmp="$(mktemp)"
+            jq --arg v "$RELEASE_TAG" '(.versions // []) + [$v] | unique | {versions: .}' "${INDEX_FILE}" > "$tmp"
+            mv "$tmp" "${INDEX_FILE}"
+          else
+            jq -n --arg v "$RELEASE_TAG" '{versions: [$v]}' > "${INDEX_FILE}"
+          fi
+
+      - name: Add a minimal index.html (web flasher UI)
+        env:
+          HTML_CONTENT: |
+            <!doctype html>
+            <html>
+            <head>
+              <meta charset="utf-8" />
+              <title>PocketMage Web Flasher</title>
+              <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+              <style>
+                body { font-family: system-ui, -apple-system, Roboto, 'Segoe UI', Arial; padding: 2rem; }
+                .controls { margin-bottom: 1rem; display:flex; gap:0.5rem; align-items:center; }
+                label { font-weight:600; }
+              </style>
+            </head>
+            <body>
+              <h1>PocketMage Web Flasher</h1>
+              <div class="controls">
+                <label for="ver">Release:</label>
+                <select id="ver"></select>
+                <label for="preserve" style="margin-left:1rem;">
+                  <input type="checkbox" id="preserve" checked /> Preserve data (flash app only)
+                </label>
+                <button id="use">Load manifest</button>
+              </div>
+            
+              <p>
+                <esp-web-install-button id="install" manifest="./firmware/PLACEHOLDER/manifest_no_erase.json"></esp-web-install-button>
+              </p>
+            
+              <script>
+                async function loadVersions() {
+                  const resp = await fetch('./manifest-index.json', {cache:"no-store"});
+                  const idx = await resp.json();
+                  const sel = document.getElementById('ver');
+                  idx.versions.slice().reverse().forEach(v=>{
+                    const o = document.createElement('option');
+                    o.value=v; o.textContent=v;
+                    sel.appendChild(o);
+                  });
+                }
+                function setManifestFor(v, preserve) {
+                  const btn = document.getElementById('install');
+                  const manifestPath = preserve ?
+                    `./firmware/${v}/manifest_no_erase.json` :
+                    `./firmware/${v}/manifest.json`;
+                  btn.manifest = manifestPath;
+                  btn.setAttribute('manifest', manifestPath);
+                }
+                document.getElementById('use').addEventListener('click', ()=>{
+                  const v = document.getElementById('ver').value;
+                  const preserve = document.getElementById('preserve').checked;
+                  setManifestFor(v, preserve);
+                  alert('Manifest set to ' + v + ' (' + (preserve ? 'preserve data' : 'full') + '). Click the button to connect your device and flash.');
+                });
+                loadVersions();
+              </script>
+            </body>
+            </html>
+        run: |
+          set -euo pipefail
+          mkdir -p docs
+          printf '%s\n' "$HTML_CONTENT" > docs/index.html
+          ls -l docs/index.html
+
+      - name: Deploy docs/ to GitHub Pages
+        uses: actions/upload-pages-artifact@v1
+        with:
+          path: docs
+
+      - name: Publish to GitHub Pages
+        uses: actions/deploy-pages@v1
+        # no inputs required; deploys artifact uploaded above
