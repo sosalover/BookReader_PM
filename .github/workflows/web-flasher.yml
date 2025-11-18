@@ -55,7 +55,7 @@ jobs:
             if [ -f boot_app0.bin ]; then
               esptool --chip esp32-s3 merge-bin \
                 -o merged-firmware.bin \
-                --flash-mode dio \
+                --flash-mode qio \
                 --flash-freq 40m \
                 --flash-size 16MB \
                 0x1000 bootloader.bin \
@@ -65,7 +65,7 @@ jobs:
             else
               esptool --chip esp32-s3 merge-bin \
                 -o merged-firmware.bin \
-                --flash-mode dio \
+                --flash-mode qio \
                 --flash-freq 40m \
                 --flash-size 16MB \
                 0x1000 bootloader.bin \
