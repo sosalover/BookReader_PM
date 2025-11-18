@@ -1,4 +1,4 @@
-name: Build & publish Web Flasher
+name: Build & publish web flasher assets
 
 on:
   push:
@@ -67,7 +67,8 @@ jobs:
         run: |
           set -euo pipefail
           
-          # Extract flash mode and freq from platformio.ini
+          # Extract flash mode and freq from platformio.ini or use sensible defaults for ESP32-S3
+          # ESP32-S3 typically uses QIO/DIO mode and 80MHz
           FLASH_MODE="dio"
           FLASH_FREQ="80m"
           FLASH_SIZE="16MB"
@@ -200,204 +201,12 @@ jobs:
           
           echo "Updated manifest-index.json with version: $RELEASE_TAG"
 
-      - name: Create web flasher interface
+      - name: Copy web flasher interface
         run: |
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/docs"
-          
-          cat > "$GITHUB_WORKSPACE/docs/index.html" << 'HTMLEOF'
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>PocketMage Web Flasher</title>
-  <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
-  <style>
-    body {
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      max-width: 800px;
-      margin: 0 auto;
-      padding: 2rem;
-      line-height: 1.6;
-    }
-    h1 {
-      margin-bottom: 0.5rem;
-    }
-    .subtitle {
-      color: #666;
-      margin-bottom: 2rem;
-    }
-    .controls {
-      background: #f5f5f5;
-      padding: 1.5rem;
-      border-radius: 8px;
-      margin-bottom: 2rem;
-    }
-    .form-row {
-      margin-bottom: 1rem;
-    }
-    label {
-      display: block;
-      font-weight: 600;
-      margin-bottom: 0.5rem;
-    }
-    select {
-      width: 100%;
-      padding: 0.5rem;
-      font-size: 1rem;
-      border: 1px solid #ccc;
-      border-radius: 4px;
-    }
-    .radio-group {
-      display: flex;
-      gap: 1rem;
-    }
-    .radio-group label {
-      display: flex;
-      align-items: center;
-      font-weight: normal;
-    }
-    .radio-group input {
-      margin-right: 0.5rem;
-    }
-    .install-section {
-      text-align: center;
-      padding: 2rem;
-      background: #fafafa;
-      border-radius: 8px;
-    }
-    .status {
-      margin-top: 1rem;
-      color: #666;
-      font-size: 0.9rem;
-    }
-    .info {
-      background: #e3f2fd;
-      border-left: 4px solid #2196f3;
-      padding: 1rem;
-      margin: 1.5rem 0;
-    }
-    .info strong {
-      display: block;
-      margin-bottom: 0.5rem;
-    }
-  </style>
-</head>
-<body>
-  <h1>PocketMage Web Flasher</h1>
-  <p class="subtitle">Flash firmware to your ESP32-S3 device via USB</p>
-
-  <div class="controls">
-    <div class="form-row">
-      <label for="version-select">Firmware Version:</label>
-      <select id="version-select">
-        <option value="">Loading versions...</option>
-      </select>
-    </div>
-
-    <div class="form-row">
-      <label>Installation Mode:</label>
-      <div class="radio-group">
-        <label>
-          <input type="radio" name="install-type" value="update" checked />
-          Update (preserve data)
-        </label>
-        <label>
-          <input type="radio" name="install-type" value="fresh" />
-          Fresh install (erase all)
-        </label>
-      </div>
-    </div>
-  </div>
-
-  <div class="info">
-    <strong>Installation Modes:</strong>
-    Update mode flashes only the application partition, preserving your NVS settings and SPIFFS data.
-    Fresh install mode writes bootloader, partition table, and application. This will erase all stored data.
-  </div>
-
-  <div class="install-section">
-    <esp-web-install-button id="install-btn"></esp-web-install-button>
-    <div class="status" id="status">Select a version to begin</div>
-  </div>
-
-  <div class="info">
-    <strong>Requirements:</strong>
-    This tool requires a Chromium-based browser (Chrome, Edge, Opera) with Web Serial support.
-    Connect your device via USB and ensure no other program is using the serial port.
-  </div>
-
-  <script>
-    const versionSelect = document.getElementById('version-select');
-    const installBtn = document.getElementById('install-btn');
-    const statusDiv = document.getElementById('status');
-    const installTypeRadios = document.querySelectorAll('input[name="install-type"]');
-
-    async function loadVersions() {
-      try {
-        const response = await fetch('./manifest-index.json', { cache: 'no-store' });
-        const data = await response.json();
-        
-        versionSelect.innerHTML = '';
-        
-        if (!data.versions || data.versions.length === 0) {
-          versionSelect.innerHTML = '<option value="">No versions available</option>';
-          statusDiv.textContent = 'No firmware versions found';
-          return;
-        }
-
-        data.versions.forEach(version => {
-          const option = document.createElement('option');
-          option.value = version;
-          option.textContent = version;
-          versionSelect.appendChild(option);
-        });
-
-        if (data.versions.length > 0) {
-          versionSelect.value = data.versions[0];
-          updateManifest();
-        }
-      } catch (error) {
-        console.error('Failed to load versions:', error);
-        versionSelect.innerHTML = '<option value="">Error loading versions</option>';
-        statusDiv.textContent = 'Failed to load version list';
-      }
-    }
-
-    function updateManifest() {
-      const version = versionSelect.value;
-      const installType = document.querySelector('input[name="install-type"]:checked').value;
-      
-      if (!version) {
-        installBtn.removeAttribute('manifest');
-        statusDiv.textContent = 'Please select a version';
-        return;
-      }
-
-      const manifestFile = installType === 'update' 
-        ? 'manifest_no_erase.json' 
-        : 'manifest.json';
-      
-      const manifestPath = `./firmware/${version}/${manifestFile}`;
-      installBtn.setAttribute('manifest', manifestPath);
-      
-      const modeText = installType === 'update' ? 'Update' : 'Fresh Install';
-      statusDiv.textContent = `Ready: ${version} (${modeText})`;
-    }
-
-    versionSelect.addEventListener('change', updateManifest);
-    installTypeRadios.forEach(radio => {
-      radio.addEventListener('change', updateManifest);
-    });
-
-    loadVersions();
-  </script>
-</body>
-</html>
-HTMLEOF
-          
-          echo "Created web flasher interface"
+          cp "$GITHUB_WORKSPACE/.github/index.html" "$GITHUB_WORKSPACE/docs/index.html"
+          echo "Copied web flasher interface"
 
       - name: Upload to GitHub Pages
         uses: actions/upload-pages-artifact@v4
