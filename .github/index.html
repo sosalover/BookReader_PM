@@ -10,7 +10,7 @@
         // Initialize eruda for debugging
         eruda.init();
     </script>
-    
+
     <!-- Import map to resolve dependencies -->
     <script type="importmap">
     {
@@ -22,7 +22,7 @@
     <!-- Import esptool-js with dependencies resolved -->
     <script type="module">
         import { ESPLoader, Transport } from "esptool-js";
-        
+
         // Make ESPLoader and Transport available globally
         window.ESPLoader = ESPLoader;
         window.Transport = Transport;
@@ -42,7 +42,7 @@
         }
 
         body {
-            font-family: 'Sorts Mill Goudy', serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-family: 'Sorts Mill Goudy', serif, -apple-system, BlinkMacOSSystemFont, 'Segoe UI', Roboto, sans-serif;
             background-color: var(--wp--preset--color--background);
             color: var(--wp--preset--color--primary);
             font-size: 21px;
@@ -342,6 +342,7 @@
                 flex-direction: column;
                 gap: 1.5rem;
             }
+
             .checkbox-group {
                 flex-direction: column;
                 align-items: flex-start;
@@ -351,10 +352,11 @@
                 flex-direction: column;
                 gap: 1rem;
             }
+
             .install-section {
                 min-width: unset;
             }
-            
+
             .connect-section {
                 position: relative;
                 top: 0;
@@ -411,7 +413,8 @@
 
         <div class="info-box">
             <strong>Installation Options</strong>
-            <p>When "Preserve user data" is checked, only application partition will be flashed, keeping your settings and saved content.</p>
+            <p>When "Preserve user data" is checked, only application partition will be flashed, keeping your settings
+                and saved content.</p>
             <p>When unchecked, a complete installation will be performed, which erases all data and settings.</p>
         </div>
 
@@ -554,7 +557,7 @@
 
                 // Request serial port
                 const port = await navigator.serial.requestPort();
-                
+
                 // Create transport
                 transport = new window.Transport(port, true);
 
@@ -609,8 +612,8 @@
                 statusDiv.textContent = 'Loading firmware files...';
 
                 // Determine which files to flash based on preserve data option
-                const fileArray = [];
-                
+                const preparedFiles = [];
+
                 // Helper to fetch a file and return Uint8Array
                 async function fetchUint8(path) {
                     const r = await fetch(path);
@@ -623,9 +626,8 @@
                     // Full install - flash bootloader and partitions (if present)
                     if (firmwareFiles.bootloader && firmwareFiles.bootloader.path) {
                         const bootloaderU8 = await fetchUint8(`./firmware/${version}/${firmwareFiles.bootloader.path}`);
-                        // convert to binary string because older bundle versions expect binary strings
-                        fileArray.push({
-                            data: uint8ToBinaryString(bootloaderU8),
+                        preparedFiles.push({
+                            dataU8: bootloaderU8,
                             address: firmwareFiles.bootloader.offset
                         });
                     } else {
@@ -634,8 +636,8 @@
 
                     if (firmwareFiles.partitions && firmwareFiles.partitions.path) {
                         const partitionsU8 = await fetchUint8(`./firmware/${version}/${firmwareFiles.partitions.path}`);
-                        fileArray.push({
-                            data: uint8ToBinaryString(partitionsU8),
+                        preparedFiles.push({
+                            dataU8: partitionsU8,
                             address: firmwareFiles.partitions.offset
                         });
                     } else {
@@ -645,20 +647,24 @@
 
                 // Always flash the application
                 const appU8 = await fetchUint8(`./firmware/${version}/${firmwareFiles.application.path}`);
-                fileArray.push({
-                    data: uint8ToBinaryString(appU8),
+                preparedFiles.push({
+                    dataU8: appU8,
                     address: firmwareFiles.application.offset
                 });
 
-                // Debug log sizes/offsets; for binary strings length is still useful
-                console.debug('Prepared files for flashing:', fileArray.map(f => ({ address: f.address, length: f.data.length })));
+                // Build the fileArray with data as Uint8Array (preferred)
+                const fileArrayU8 = preparedFiles.map(f => ({
+                    data: f.dataU8,
+                    address: f.address
+                }));
 
-                statusDiv.textContent = 'Flashing firmware...';
+                // Debug log sizes/offsets
+                console.debug('Prepared files for flashing (Uint8Array):', fileArrayU8.map(f => ({ address: f.address, length: (f.data && f.data.byteLength) || 0 })));
 
-                // Flash the files using the correct API.
-                // Many esptool-js bundle versions expect file.data to be a binary (Latin1) string.
-                const flashOptions = {
-                    fileArray: fileArray,
+                statusDiv.textContent = 'Flashing firmware (attempt 1 using Uint8Array)...';
+
+                // Flash options - calculateMD5Hash handles both Uint8Array and binary string
+                const flashOptionsBase = {
                     eraseAll: !preserveData, // Erase all for full install
                     compress: true,
                     reportProgress: (fileIndex, written, total) => {
@@ -666,39 +672,64 @@
                         progressFill.style.width = `${percent}%`;
                         progressText.textContent = `${percent}%`;
                     },
-                    // calculateMD5Hash: esptool-js often sends binary strings to this, so we expect a string and parse Latin1
                     calculateMD5Hash: (image) => {
-                        if (!image) return null;
-                        // If image is Uint8Array for some bundle versions, convert
-                        if (image instanceof Uint8Array) {
-                            return CryptoJS.MD5(uint8ArrayToWordArray(image)).toString();
-                        }
-                        // If image is already a binary string, parse as Latin1
                         try {
-                            return CryptoJS.MD5(CryptoJS.enc.Latin1.parse(image)).toString();
+                            if (!image) return null;
+                            // If image is Uint8Array
+                            if (image instanceof Uint8Array) {
+                                return CryptoJS.MD5(uint8ArrayToWordArray(image)).toString();
+                            }
+                            // If image is already a binary (Latin1) string
+                            if (typeof image === 'string') {
+                                return CryptoJS.MD5(CryptoJS.enc.Latin1.parse(image)).toString();
+                            }
                         } catch (e) {
                             console.warn('calculateMD5Hash fallback failed', e);
-                            return null;
                         }
+                        return null;
                     },
                 };
 
-                await esploader.writeFlash(flashOptions);
+                // Attach transport/esploader instance when calling writeFlash
+                // We'll attempt with Uint8Array first; if the library version expects binary strings and errors with an indexOf-style message,
+                // we'll retry with binary strings converted from the Uint8Array.
+                let attempt = 1;
+                try {
+                    await esploader.writeFlash(Object.assign({ fileArray: fileArrayU8 }, flashOptionsBase));
+                } catch (err) {
+                    console.warn('First writeFlash attempt failed:', err && err.message ? err.message : err);
+                    // If error looks like the indexOf issue (library expecting strings), retry with binary strings
+                    const msg = err && err.message ? err.message.toLowerCase() : '';
+                    if (msg.includes('indexof') || msg.includes('cannot read properties of undefined') || msg.includes('undefined')) {
+                        statusDiv.textContent = 'Retrying flash using string encoding fallback...';
+                        attempt = 2;
+                        // Build fallback fileArray with binary strings
+                        const fileArrayStr = preparedFiles.map(f => {
+                            return {
+                                data: uint8ToBinaryString(f.dataU8),
+                                address: f.address
+                            };
+                        });
+                        console.debug('Prepared files for flashing (fallback strings):', fileArrayStr.map(f => ({ address: f.address, length: f.data.length })));
+                        await esploader.writeFlash(Object.assign({ fileArray: fileArrayStr }, flashOptionsBase));
+                    } else {
+                        // If it's not the indexOf-style problem, rethrow to outer catch
+                        throw err;
+                    }
+                }
 
                 // Clean up after flashing
                 if (esploader.after) {
                     await esploader.after();
                 }
 
-                statusDiv.textContent = 'Firmware flashed successfully!';
+                statusDiv.textContent = `Firmware flashed successfully (attempt ${attempt})!`;
                 progressFill.style.width = '100%';
                 progressText.textContent = '100%';
 
             } catch (error) {
                 console.error('Flashing failed:', error);
-                // The indexOf error you saw is often triggered when a library expects a string (and uses .indexOf)
-                // but gets undefined or another type. Converting to a binary string above covers the common case.
-                statusDiv.textContent = `Flashing failed: ${error.message}`;
+                statusDiv.textContent = `Flashing failed: ${error && error.message ? error.message : String(error)}`;
             } finally {
                 flashBtn.disabled = false;
                 setTimeout(() => {
@@ -720,7 +751,7 @@
                 statusDiv.textContent = 'Error: ESPLoader library failed to load. Please refresh the page.';
                 return;
             }
-            
+
             loadVersions();
         });
     </script>
