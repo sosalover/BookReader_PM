@@ -17,7 +17,7 @@
         // expose Node Buffer in the global scope for libraries that expect it 
         window.Buffer = window.buffer && window.buffer.Buffer; 
     </script>
-    
+
     <!-- Import map to resolve dependencies -->
     <script type="importmap">
     {
@@ -658,20 +658,26 @@
                     address: firmwareFiles.application.offset
                 });
 
-                // Build the fileArray with data as Uint8Array (preferred)
-                const fileArrayU8 = preparedFiles.map(f => ({
-                    data: f.dataU8,
+                // esptool-js expects data as binary string (Latin1), not Uint8Array
+                // Convert all to binary strings
+                const fileArrayStr = preparedFiles.map(f => ({
+                    data: uint8ToBinaryString(f.dataU8),
                     address: f.address
                 }));
 
                 // Debug log sizes/offsets
-                console.debug('Prepared files for flashing (Uint8Array):', fileArrayU8.map(f => ({ address: f.address, length: (f.data && f.data.byteLength) || 0 })));
+                console.debug('Prepared files for flashing:', fileArrayStr.map(f => ({
+                    address: '0x' + f.address.toString(16),
+                    length: f.data.length
+                })));
 
-                statusDiv.textContent = 'Flashing firmware (attempt 1 using Uint8Array)...';
+                statusDiv.textContent = 'Flashing firmware...';
 
-                // Flash options - calculateMD5Hash handles both Uint8Array and binary string
-                const flashOptionsBase = {
-                    eraseAll: !preserveData, // Erase all for full install
+                // Flash options
+                const flashOptions = {
+                    fileArray: fileArrayStr,
+                    flashSize: 'keep',
+                    eraseAll: !preserveData,
                     compress: true,
                     reportProgress: (fileIndex, written, total) => {
                         const percent = Math.round((written / total) * 100);
@@ -679,57 +685,17 @@
                         progressText.textContent = `${percent}%`;
                     },
                     calculateMD5Hash: (image) => {
-                        try {
-                            if (!image) return null;
-                            // If image is Uint8Array
-                            if (image instanceof Uint8Array) {
-                                return CryptoJS.MD5(uint8ArrayToWordArray(image)).toString();
-                            }
-                            // If image is already a binary (Latin1) string
-                            if (typeof image === 'string') {
-                                return CryptoJS.MD5(CryptoJS.enc.Latin1.parse(image)).toString();
-                            }
-                        } catch (e) {
-                            console.warn('calculateMD5Hash fallback failed', e);
-                        }
-                        return null;
-                    },
+                        if (!image || typeof image !== 'string') return null;
+                        return CryptoJS.MD5(CryptoJS.enc.Latin1.parse(image)).toString();
+                    }
                 };
 
-                // Attach transport/esploader instance when calling writeFlash
-                // We'll attempt with Uint8Array first; if the library version expects binary strings and errors with an indexOf-style message,
-                // we'll retry with binary strings converted from the Uint8Array.
-                let attempt = 1;
-                try {
-                    await esploader.writeFlash(Object.assign({ fileArray: fileArrayU8 }, flashOptionsBase));
-                } catch (err) {
-                    console.warn('First writeFlash attempt failed:', err && err.message ? err.message : err);
-                    // If error looks like the indexOf issue (library expecting strings), retry with binary strings
-                    const msg = err && err.message ? err.message.toLowerCase() : '';
-                    if (msg.includes('indexof') || msg.includes('cannot read properties of undefined') || msg.includes('undefined')) {
-                        statusDiv.textContent = 'Retrying flash using string encoding fallback...';
-                        attempt = 2;
-                        // Build fallback fileArray with binary strings
-                        const fileArrayStr = preparedFiles.map(f => {
-                            return {
-                                data: uint8ToBinaryString(f.dataU8),
-                                address: f.address
-                            };
-                        });
-                        console.debug('Prepared files for flashing (fallback strings):', fileArrayStr.map(f => ({ address: f.address, length: f.data.length })));
-                        await esploader.writeFlash(Object.assign({ fileArray: fileArrayStr }, flashOptionsBase));
-                    } else {
-                        // If it's not the indexOf-style problem, rethrow to outer catch
-                        throw err;
-                    }
-                }
+                await esploader.writeFlash(flashOptions);
 
                 // Clean up after flashing
-                if (esploader.after) {
-                    await esploader.after();
-                }
+                await esploader.hardReset();
 
-                statusDiv.textContent = `Firmware flashed successfully (attempt ${attempt})!`;
+                statusDiv.textContent = 'Firmware flashed successfully! Device is rebooting...';
                 progressFill.style.width = '100%';
                 progressText.textContent = '100%';
 
