@@ -1,0 +1,227 @@
+name: Creare et Publicare Inscriptorem per Rete
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  creare_et_publicare:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: Code/PocketMage_V3
+
+    steps:
+      - name: Checkout release tag
+        if: github.event_name == 'release'
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+
+      - name: Checkout main
+        if: ${{ github.event_name != 'release' }}
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Prepare the Python Cauldron
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Summon PlatformIO, esptool & jq
+        run: |
+          set -euo pipefail
+          pip install -U platformio esptool
+          sudo apt-get update
+          sudo apt-get install -y jq
+
+      - name: Forge the PocketMage Firmware
+        run: |
+          set -euo pipefail
+          pio run -e PM_V3
+          echo "Build directory contents:"
+          ls -lh .pio/build/PM_V3/*.bin
+
+      - name: Divine Partition Offsets
+        id: offsets
+        run: |
+          set -euo pipefail
+          
+          # Read offsets from partition CSV (expect 0x-prefixed hex or decimal)
+          APP0_OFFSET=$(grep "^app0," partitions_4APP.csv | cut -d',' -f4 | tr -d ' ')
+          PARTITIONS_OFFSET="0x8000"  # Standard for ESP32
+          
+          echo "bootloader_offset=0x0" >> $GITHUB_OUTPUT
+          echo "partitions_offset=$PARTITIONS_OFFSET" >> $GITHUB_OUTPUT
+          echo "app0_offset=$APP0_OFFSET" >> $GITHUB_OUTPUT
+          
+          echo "Partition offsets:"
+          echo "  Bootloader: 0x0"
+          echo "  Partitions: $PARTITIONS_OFFSET"
+          echo "  App0: $APP0_OFFSET"
+
+      - name: Determine the Flash Sigils (parameters)
+        id: flash_params
+        run: |
+          set -euo pipefail
+          
+          FLASH_MODE="dio"
+          FLASH_FREQ="80m"
+          FLASH_SIZE="16MB"
+          
+          echo "flash_mode=$FLASH_MODE" >> $GITHUB_OUTPUT
+          echo "flash_freq=$FLASH_FREQ" >> $GITHUB_OUTPUT
+          echo "flash_size=$FLASH_SIZE" >> $GITHUB_OUTPUT
+          
+          echo "Flash parameters: mode=$FLASH_MODE freq=$FLASH_FREQ size=$FLASH_SIZE"
+
+      - name: Determine Version Tag
+        id: version
+        run: |
+          set -euo pipefail
+          
+          # Retrieve release tag (empty when not triggered by release event)
+          RELEASE_TAG="${{ github.event.release.tag_name }}"
+          
+          # Use timestamped dev version for non-release builds
+          if [ -z "$RELEASE_TAG" ]; then
+            RELEASE_TAG="dev-$(date +%Y%m%d-%H%M%S)"
+          fi
+          
+          echo "release_tag=$RELEASE_TAG" >> $GITHUB_OUTPUT
+          echo "Determined version: $RELEASE_TAG"
+
+      - name: Scribe the Firmware Manifest
+        run: |
+          set -euo pipefail
+
+          RELEASE_TAG="${{ steps.version.outputs.release_tag }}"
+
+          BUILD_DIR="$GITHUB_WORKSPACE/Code/PocketMage_V3/.pio/build/PM_V3"
+          TARGET_DIR="$GITHUB_WORKSPACE/docs/firmware/${RELEASE_TAG}"
+          mkdir -p "${TARGET_DIR}"
+
+          # Copy all firmware files
+          cp "${BUILD_DIR}/firmware.bin" "${TARGET_DIR}/firmware.bin"
+          cp "${BUILD_DIR}/bootloader.bin" "${TARGET_DIR}/bootloader.bin"
+          cp "${BUILD_DIR}/partitions.bin" "${TARGET_DIR}/partitions.bin"
+
+          echo "Created firmware package for version: $RELEASE_TAG"
+
+          # Get partition offsets from previous step
+          PARTITIONS_OFFSET="${{ steps.offsets.outputs.partitions_offset }}"
+          APP0_OFFSET_HEX="${{ steps.offsets.outputs.app0_offset }}"
+
+          # Convert hex (0x...) or decimal to decimal using bash arithmetic expansion
+          to_decimal() {
+            local v="$1"
+            v=$(echo "$v" | tr -d '[:space:]')
+            if [[ "$v" =~ ^0x ]] || [[ "$v" =~ ^0X ]]; then
+              echo $((v))
+            else
+              if [[ -z "$v" ]]; then
+                echo 0
+              else
+                echo $((v))
+              fi
+            fi
+          }
+
+          PARTITIONS_OFFSET_DEC=$(to_decimal "$PARTITIONS_OFFSET")
+          APP0_OFFSET_DEC=$(to_decimal "$APP0_OFFSET_HEX")
+
+          # Create a single manifest with all parts
+          jq -n \
+            --arg ver "$RELEASE_TAG" \
+            --argjson part_off "$PARTITIONS_OFFSET_DEC" \
+            --argjson app_off "$APP0_OFFSET_DEC" \
+            '{
+              name: "PocketMage OS",
+              version: $ver,
+              home_assistant_domain: "",
+              new_install_prompt_erase: true,
+              builds: [{
+                chipFamily: "ESP32-S3",
+                parts: [
+                  {
+                    path: "bootloader.bin",
+                    offset: 0
+                  },
+                  {
+                    path: "partitions.bin",
+                    offset: $part_off
+                  },
+                  {
+                    path: "firmware.bin",
+                    offset: $app_off
+                  }
+                ]
+              }]
+            }' > "${TARGET_DIR}/manifest.json"
+
+          # Ensure docs folder exists
+          mkdir -p "$GITHUB_WORKSPACE/docs"
+
+          # Update or create version index
+          INDEX_FILE="$GITHUB_WORKSPACE/docs/manifest-index.json"
+          if [ -f "${INDEX_FILE}" ]; then
+            jq --arg v "$RELEASE_TAG" '
+              def uniq_preserve: reduce .[] as $i ([]; if index($i)==null then . + [$i] else . end);
+              ([$v] + (.versions // [])) | uniq_preserve | {versions: .}
+            ' "${INDEX_FILE}" > "${INDEX_FILE}.tmp"
+            mv "${INDEX_FILE}.tmp" "${INDEX_FILE}"
+          else
+            jq -n --arg v "$RELEASE_TAG" '{versions: [$v]}' > "${INDEX_FILE}"
+          fi
+
+      - name: Write the Deploy Info Scroll
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/docs"
+
+          RELEASE_TAG="${{ steps.version.outputs.release_tag }}"
+
+          jq -n \
+            --arg release_tag "$RELEASE_TAG" \
+            --arg run_id "$GITHUB_RUN_ID" \
+            --arg run_number "$GITHUB_RUN_NUMBER" \
+            --arg sha "$GITHUB_SHA" \
+            --arg timestamp "$(date --utc +%Y-%m-%dT%H:%M:%SZ)" \
+            '{release_tag: $release_tag, run_id: $run_id, run_number: $run_number, sha: $sha, timestamp: $timestamp}' \
+            > "$GITHUB_WORKSPACE/docs/deploy-info.json"
+
+      - name: Invoke the Web Flasher Smithy
+        run: |
+          python "$GITHUB_WORKSPACE/Code/WebFlasher/webflasher.py" \
+            --workspace "$GITHUB_WORKSPACE" \
+            --version "${{ steps.version.outputs.release_tag }}" \
+            --repo-url "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" \
+            --gh-pages-dir "$(mktemp -d)" \
+            --keep-dev 2
+
+      - name: Transport Web Flasher Artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/docs"
+          cp "$GITHUB_WORKSPACE/Code/WebFlasher/index.html" "$GITHUB_WORKSPACE/docs/index.html"
+          cp "$GITHUB_WORKSPACE/Code/WebFlasher/logo.png" "$GITHUB_WORKSPACE/docs/logo.png"
+          cp "$GITHUB_WORKSPACE/Code/WebFlasher/favicon.png" "$GITHUB_WORKSPACE/docs/favicon.png"
+          echo "Web flasher interface ready for deployment"
+
+      - name: Deploy the Artifacts to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./docs
+          keep_files: false
+          commit_message: "chore(pages): deploy docs from run ${{ github.run_number }}"

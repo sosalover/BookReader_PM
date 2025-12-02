@@ -34,7 +34,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pio-
 
-      - name: Summon the PlatformIO Grimoire (stolas's grimoire :D)
+      - name: Summon PlatformIO
         run: pip install -U platformio
 
       - name: Forge the PocketMage Spell
@@ -45,9 +45,11 @@ jobs:
           echo "Listing recursively:"
           ls -lR .pio/build/PM_V3
 
-
       - name: Create the Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: pocketmage-artifacts
-          path: Code/PocketMage_V3/.pio/build/PM_V3/firmware.*
+          path: |
+            Code/PocketMage_V3/.pio/build/PM_V3/firmware.*
+            Code/PocketMage_V3/.pio/build/PM_V3/*.bin
+            Code/PocketMage_V3/.pio/build/PM_V3/*.elf
