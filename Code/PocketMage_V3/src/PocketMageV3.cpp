@@ -161,7 +161,6 @@ void loop() {
     if (DEBUG_VERBOSE) PowerSystem.printDiagnostics();
   #endif
 
-
   //ledc_set_duty(LEDC_LOW_SPEED_MODE, PWM_CHANNEL, i);
   //ledc_update_duty(LEDC_LOW_SPEED_MODE, PWM_CHANNEL);
   //i += 1;

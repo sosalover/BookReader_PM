@@ -27,8 +27,11 @@ public:
   // To Do: create a task on core 1 that checks for timeout and sets a flag for OS
   long getTimeDiff()                { return timeoutMillis_ - prevTimeMillis_; }
   volatile long getTimeoutMillis() const                    { return timeoutMillis_; }
+
+  volatile long  getPrevTimeMillis() const                    { return prevTimeMillis_; }
   void setTimeoutMillis(long t)                            { timeoutMillis_ = t;  }
   void setPrevTimeMillis(long t)                        { prevTimeMillis_ = t; } 
+
 private:
   RTC_PCF8563 &rtc_;  
   bool begun_ = false;
