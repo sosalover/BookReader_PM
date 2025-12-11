@@ -112,7 +112,7 @@ void commandSelect(String command) {
     TXT_INIT();
   }
   /////////////////////////////
-  else if (command == "file wizard" || command == "wiz" || command == "file wiz" || command == "file" || command == "2") {
+  else if (command == "file wizard" || command == "wiz" || command == "file wiz" || command == "filewiz" || command == "file" || command == "2") {
     FILEWIZ_INIT();
   }
   /////////////////////////////
