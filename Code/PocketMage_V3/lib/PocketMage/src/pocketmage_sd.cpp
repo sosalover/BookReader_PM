@@ -690,7 +690,7 @@ bool PocketmageSD::readBinaryFile(const char* path, uint8_t* buf, size_t len) {
   if (noTimeout)
     noTimeout = false;
   if (SAVE_POWER)
-    setCpuFrequencyMhz(40);
+    pocketmage::setCpuSpeed(POWER_SAVE_FREQ);
 
   return n == len;
 }
