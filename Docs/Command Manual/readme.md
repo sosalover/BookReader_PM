@@ -109,3 +109,12 @@ Manage and install .tar apps to OTA slots. Commands are case-insensitive.
 - **( D )** | Delete app in selected slot
 - **(FN) + ( < )** | Exit app / return to menu
 - **Progress Bar** | Shows extraction (0–50%) and installation (50–100%) status
+---
+## Sleep Modes
+When on battery, save power and look at a random screensaver. When charging, view a clock, upcoming tasks, and weather (work in progress)
+### Sleep (when not plugged into usb)
+- **sleep button** to enter sleep
+- **any key on keyboard** to wake
+### Now-Later (when usb is plugged in)
+- **sleep button** to enter now-later
+- **sleep button** to wake
