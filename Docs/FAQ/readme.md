@@ -1,31 +1,17 @@
 # PocketMage FAQ
-
----
-
-
-
 #### Helpful Links
-
 ---
-
 [PocketMage.org](https://pocketmage.org/)
 
 [PocketMage - GitHub](https://github.com/ashtf8/PocketMage_PDA)
 
 [PocketMage - Discord](https://discord.gg/KSCapSf4XH)
 
-
-
 [Ashtf - YouTube](https://www.youtube.com/@ashtf)
 
 [Ashtf - Patreon](patreon.com/Ashtf)
 
-
-
-
-
 #### General Information
-
 ---
 
 ###### **What is PocketMage?**
@@ -73,7 +59,6 @@ You can subscribe to [Ashtf's YouTube Channel](https://www.youtube.com/@ashtf) f
 
 
 #### Building and Operating the PocketMage
-
 ---
 
 ###### **Where is the build guide?**
@@ -107,7 +92,6 @@ International kits do not come with a battery because of shipping regulations. B
 
 
 #### Common Issues
-
 ---
 
 ###### **My dictionary isn't working!**
