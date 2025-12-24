@@ -1,6 +1,9 @@
 # PocketMage FAQ
+
 #### Helpful Links
+
 ---
+
 [PocketMage.org](https://pocketmage.org/)
 
 [PocketMage - GitHub](https://github.com/ashtf8/PocketMage_PDA)
@@ -12,6 +15,7 @@
 [Ashtf - Patreon](patreon.com/Ashtf)
 
 #### General Information
+
 ---
 
 ###### **What is PocketMage?**
@@ -59,6 +63,7 @@ You can subscribe to [Ashtf's YouTube Channel](https://www.youtube.com/@ashtf) f
 
 
 #### Building and Operating the PocketMage
+
 ---
 
 ###### **Where is the build guide?**
@@ -91,7 +96,14 @@ International kits do not come with a battery because of shipping regulations. B
 
 
 
+###### **What is the programming mode switch?**
+
+The programming mode switch allows you to program and debug the PocketMage. Internally, it connects the USB port directly to the microcontroller, bypassing the USB and battery charge controller. You may keep programming mode on and use the device as normal with no issues, but your charging will be limited to 500mA as opposed to fast charging when programming mode is turned off.
+
+
+
 #### Common Issues
+
 ---
 
 ###### **My dictionary isn't working!**
@@ -115,12 +127,4 @@ Please report the bug in detail on the [GitHub issues page](https://github.com/a
 ###### **My SD card isn't working!**
 
 First, ensure that your SD card is below 128gb. The recommended size is under 64gb. Next, ensure that your SD card is formatted to FAT32. It will not work unless it's formatted to FAT32.
-
-
-
-
-
-
-
-
 
