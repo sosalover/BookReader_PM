@@ -102,6 +102,13 @@ Type commands to navigate dates or create events. All commands are case-insensit
 - **1, 2, 3, ...** | Open event by index
 - **(FN) + ( < )** | Exit app
 
+### Repeating Events
+- **no** | No repeat
+- **daily** | Repeat every day
+- **weekly xx** | Repeat every week, **xx** is one or more of **mo**, **tu**, **we**, **th**, **fr**, **sa**, **su**
+- **monthly xx** | Repeat monthly, **xx** is the day of the month (1-31) or ordinal weekday (ex. **2tu** = the second Tuesday of each month)
+- **yearly xx** | Repeat every year, **xx** is month and day of the month (ex. **apr22**)
+
 ---
 ## Journal
 Type a date to open or create a journal entry. Commands are case-insensitive.
