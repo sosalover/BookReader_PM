@@ -15,7 +15,7 @@
   I will try my best to keep this GitHub up to date with the development of the device.
 
 # [Creating Your Own Apps]
-  Check out the /Code/BlankApp folder for a simple example app template. Check out the following video as a tutorial on how to create and format your app:
+  Check the [APP_TEMPLATE.cpp](./Code/PocketMage_V3/src/APP_TEMPLATE.cpp) and [/Code/PocketMage_V3/src/readme.md](./Code/PocketMage_V3/src/readme.md) file for more information. Check out the following video as a tutorial on how to create and format your app:
 
 [Developing For the PocketMage](https://www.youtube.com/watch?v=3Ytc-3-BbMM)
 
