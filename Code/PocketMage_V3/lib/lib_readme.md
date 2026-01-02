@@ -16,12 +16,7 @@ This is a basic overview of pocketmage library. Any suggestions/edits to further
 
 2. Pocketmage system is a namespace
 
-> pocketmage::typeOfMethod::method()<br />
-> current pocketmage method types:
-> - file
-> - time
-> - power
-> - debug
+> pocketmage::method()<br />
 
 ## Classes:
 
