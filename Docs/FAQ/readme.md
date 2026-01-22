@@ -128,5 +128,5 @@ Please report the bug in detail on the [GitHub issues page](https://github.com/a
 
 ###### **My SD card isn't working!**
 
-First, ensure that your SD card is below 32gb. The recommended size is 16gb, the smaller the SD card the faster the PocketMage will be. Next, ensure that your SD card is formatted to FAT32. It will not work unless it's formatted to FAT32.
+First, ensure that your SD card is below 32gb. The recommended size is 8gb, the smaller the SD card the faster the PocketMage will be. Next, ensure that your SD card is formatted to FAT32. It will not work unless it's formatted to FAT32.
 
