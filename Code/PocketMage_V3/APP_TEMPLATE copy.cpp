@@ -1,6 +1,6 @@
 // Book Reader OTA App — PocketMage
 // Place your .md file at /books/book.md on the SD card.
-// Navigation: < / > to page through, FN+< / FN+> to jump chunks.
+// Navigation: < / > to page through, FN+< / FN+> to jump chapters.
 // Press ESC to save your position and return to PocketMage OS.
 
 #include <SD_MMC.h>
@@ -12,7 +12,6 @@
 static const char* const BOOK_PATH = "/books/book.md";
 static const char* const BMARK_DIR = "/books/.bmarks";
 static const char* const BMARK_PATH = "/books/.bmarks/book.bmark";
-static const char* const IDX_PATH = "/books/.bmarks/book.idx";
 
 #define SPECIAL_PADDING 20
 #define SPACEWIDTH_SYMBOL "n"
@@ -22,8 +21,6 @@ static const char* const IDX_PATH = "/books/.bmarks/book.idx";
 #define NORMAL_LINE_PADDING 4
 #define LINES_PER_PAGE 12
 #define CONTENT_START_Y 20
-#define LINES_PER_CHUNK 100  // lines per chunk; also hard cap during load
-#define MIN_FREE_HEAP 35000  // bail out of loading if heap drops below this
 
 // ── Font setup ────────────────────────────────────────────────────────────────
 enum FontFamily { serif = 0, sans = 1, mono = 2 };
@@ -175,12 +172,6 @@ struct DocLine {
       current.index = indexCounter++;
       lines.push_back(current);
     }
-    // Blank lines and rules have no words but still occupy vertical space.
-    // Give them a scroll slot so they get skipped on later pages.
-    if (lines.empty() && (style == 'B' || style == 'H')) {
-      current.index = indexCounter++;
-      lines.push_back(current);
-    }
   }
 
   // Returns pixel height used
@@ -290,17 +281,17 @@ struct DocLine {
   }
 };
 
-// ── Chunk index ────────────────────────────────────────────────────────────────
-struct ChunkInfo {
-  size_t offset;   // byte position in file where this chunk starts
-  String heading;  // first # heading seen in/before this chunk (may be empty)
+// ── Chapter tracking ──────────────────────────────────────────────────────────
+struct Chapter {
+  size_t offset;  // byte position in file where this chapter starts
+  String title;
 };
 
-static std::vector<ChunkInfo> chunks;
+static std::vector<Chapter> chapters;
 static std::vector<DocLine> docLines;
-static int currentChunk = 0;
+static int currentChapter = 0;
 static ulong pageIndex = 0;
-static bool needsRedraw = false;  // set true by APP_INIT after loading completes
+static bool needsRedraw = true;
 static bool fileError = false;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -316,129 +307,37 @@ static int getMaxPage() {
   return (total <= 0) ? 0 : (total - 1) / LINES_PER_PAGE;
 }
 
-// ── Index building ─────────────────────────────────────────────────────────────
-static void buildIndex() {
-  // Show progress on OLED during (potentially slow) scan
-  u8g2.clearBuffer();
-  u8g2.setFont(u8g2_font_5x7_tf);
-  u8g2.drawStr(1, 9, "Indexing...");
-  u8g2.sendBuffer();
-
-  chunks.clear();
+// ── Chapter scanning ──────────────────────────────────────────────────────────
+static void scanChapters() {
+  chapters.clear();
   File f = SD_MMC.open(BOOK_PATH, FILE_READ);
   if (!f) {
     fileError = true;
     return;
   }
 
-  char headBuf[64] = "";  // last # heading seen
-  int lineCount = 0;
-
-  // First chunk always starts at byte 0
-  ChunkInfo first;
-  first.offset = 0;
-  first.heading = "";
-  chunks.push_back(first);
-
   while (f.available()) {
-    // Read line byte-by-byte — zero heap allocation per line
-    char buf[256];
-    int len = 0;
-    while (f.available() && len < 255) {
-      char c = (char)f.read();
-      if (c == '\n')
-        break;
-      buf[len++] = c;
-    }
-    buf[len] = '\0';
-    // Strip trailing \r for Windows line endings
-    if (len > 0 && buf[len - 1] == '\r')
-      buf[--len] = '\0';
-
-    // Capture first-level heading; label current chunk if still unlabeled
-    if (buf[0] == '#' && buf[1] == ' ') {
-      size_t hlen = strlen(buf + 2);
-      if (hlen >= sizeof(headBuf))
-        hlen = sizeof(headBuf) - 1;
-      memcpy(headBuf, buf + 2, hlen);
-      headBuf[hlen] = '\0';
-      if (chunks.back().heading.length() == 0)
-        chunks.back().heading = String(headBuf);
-    }
-
-    lineCount++;
-    if (lineCount % LINES_PER_CHUNK == 0) {
-      // New chunk starts right after this line
-      ChunkInfo ci;
-      ci.offset = (size_t)f.position();
-      ci.heading = String(headBuf);  // carry forward last known heading
-      chunks.push_back(ci);
-    }
-  }
-  f.close();
-
-  // Cache index to SD so subsequent opens skip this scan
-  if (!SD_MMC.exists(BMARK_DIR))
-    SD_MMC.mkdir(BMARK_DIR);
-  File idx = SD_MMC.open(IDX_PATH, FILE_WRITE);
-  if (idx) {
-    for (auto& ci : chunks) {
-      idx.print(String((unsigned long)ci.offset));
-      idx.print('\t');
-      idx.print(ci.heading);
-      idx.print('\n');
-    }
-    idx.close();
-  }
-}
-
-static bool loadIndex() {
-  if (!SD_MMC.exists(IDX_PATH))
-    return false;
-  File f = SD_MMC.open(IDX_PATH, FILE_READ);
-  if (!f)
-    return false;
-
-  chunks.clear();
-  while (f.available()) {
+    size_t pos = f.position();
     String line = f.readStringUntil('\n');
     line.trim();
-    if (line.length() == 0)
-      continue;
-    int tab = line.indexOf('\t');
-    ChunkInfo ci;
-    if (tab >= 0) {
-      ci.offset = (size_t)line.substring(0, tab).toInt();
-      ci.heading = line.substring(tab + 1);
-    } else {
-      ci.offset = (size_t)line.toInt();
-      ci.heading = "";
+    if (line.startsWith("# ")) {
+      chapters.push_back({pos, line.substring(2)});
     }
-    chunks.push_back(ci);
   }
   f.close();
-  return !chunks.empty();
-}
 
-static void buildOrLoadIndex() {
-  if (!loadIndex())
-    buildIndex();
-  if (chunks.empty()) {
-    ChunkInfo fallback;
-    fallback.offset = 0;
-    fallback.heading = "Book";
-    chunks.push_back(fallback);
+  // No chapter markers — treat whole file as one section
+  if (chapters.empty()) {
+    chapters.push_back({0, "Book"});
   }
 }
 
-// ── Chunk loading ──────────────────────────────────────────────────────────────
+// ── Chapter loading ───────────────────────────────────────────────────────────
 static void populateDocLines() {
   indexCounter = 0;
   for (auto& d : docLines) {
     d.parseWords();
-    d.line = "";                              // free raw String — no longer needed
     d.splitToLines();
-    std::vector<wordObject>().swap(d.words);  // free word list + capacity
   }
   if (docLines.empty()) {
     DocLine blank;
@@ -446,13 +345,12 @@ static void populateDocLines() {
     blank.line = "(empty)";
     docLines.push_back(blank);
     docLines.back().parseWords();
-    docLines.back().line = "";
     docLines.back().splitToLines();
   }
 }
 
-static void loadChunk(int idx) {
-  if (idx < 0 || idx >= (int)chunks.size())
+static void loadChapter(int idx) {
+  if (idx < 0 || idx >= (int)chapters.size())
     return;
 
   File f = SD_MMC.open(BOOK_PATH, FILE_READ);
@@ -461,20 +359,15 @@ static void loadChunk(int idx) {
     return;
   }
 
-  f.seek(chunks[idx].offset);
-  size_t endOffset = (idx + 1 < (int)chunks.size()) ? chunks[idx + 1].offset : 0;
+  f.seek(chapters[idx].offset);
+  size_t endOffset = (idx + 1 < (int)chapters.size()) ? chapters[idx + 1].offset
+                                                      : (size_t)0;  // 0 signals "read until EOF"
 
-  std::vector<DocLine>().swap(docLines);  // clear + release capacity
-  docLines.reserve(LINES_PER_CHUNK);     // pre-allocate; prevents reallocation churn
+  docLines.clear();
   ulong listCounter = 1;
-  int lineCount = 0;
 
   while (f.available()) {
-    if (endOffset != 0 && (size_t)f.position() >= endOffset)
-      break;
-    if (lineCount >= LINES_PER_CHUNK)
-      break;
-    if (ESP.getFreeHeap() < MIN_FREE_HEAP)
+    if (endOffset != 0 && f.position() >= endOffset)
       break;
 
     String raw = f.readStringUntil('\n');
@@ -490,9 +383,6 @@ static void loadChunk(int idx) {
     else if (raw.startsWith("# ")) {
       st = '1';
       content = raw.substring(2);
-      // Retroactively label chunk if the index scan missed it
-      if (chunks[idx].heading.length() == 0)
-        chunks[idx].heading = content;
     } else if (raw.startsWith("## ")) {
       st = '2';
       content = raw.substring(3);
@@ -522,7 +412,6 @@ static void loadChunk(int idx) {
     dl.style = st;
     dl.line = content;
     docLines.push_back(dl);
-    lineCount++;
   }
   f.close();
 
@@ -544,11 +433,11 @@ static void loadBookmark() {
   if (sep < 0)
     return;
 
-  int ck = data.substring(0, sep).toInt();
+  int ch = data.substring(0, sep).toInt();
   ulong pg = (ulong)data.substring(sep + 1).toInt();
 
-  if (ck >= 0 && ck < (int)chunks.size()) {
-    currentChunk = ck;
+  if (ch >= 0 && ch < (int)chapters.size()) {
+    currentChapter = ch;
     pageIndex = pg;
   }
 }
@@ -559,22 +448,20 @@ static void saveBookmark() {
   File f = SD_MMC.open(BMARK_PATH, FILE_WRITE);
   if (!f)
     return;
-  f.print(String(currentChunk) + ":" + String((unsigned long)pageIndex));
+  f.print(String(currentChapter) + ":" + String((unsigned long)pageIndex));
   f.close();
 }
 
 // ── OLED update ───────────────────────────────────────────────────────────────
 static void updateOLED() {
-  if (chunks.empty() || currentChunk >= (int)chunks.size())
-    return;
-  int totalCk = (int)chunks.size();
+  int totalCh = (int)chapters.size();
   int maxPg = getMaxPage();
 
   float progress =
-      (totalCk <= 1)
+      (totalCh <= 1)
           ? (maxPg > 0 ? (float)pageIndex / (float)maxPg : 1.0f)
-          : ((float)currentChunk + (maxPg > 0 ? (float)pageIndex / (float)maxPg : 1.0f)) /
-                (float)totalCk;
+          : ((float)currentChapter + (maxPg > 0 ? (float)pageIndex / (float)maxPg : 1.0f)) /
+                (float)totalCh;
   progress = constrain(progress, 0.0f, 1.0f);
   int barFill = (int)(253.0f * progress);
 
@@ -582,17 +469,15 @@ static void updateOLED() {
   u8g2.setDrawColor(1);
   u8g2.setFont(u8g2_font_5x7_tf);
 
-  // Chunk heading (fallback to "Chunk N" if no heading was found)
-  String title = chunks[currentChunk].heading;
-  if (title.length() == 0)
-    title = "Chunk " + String(currentChunk + 1);
+  // Chapter title (truncated to ~36 chars)
+  String title = chapters[currentChapter].title;
   if ((int)title.length() > 36)
     title = title.substring(0, 35) + "~";
   u8g2.drawStr(1, 9, title.c_str());
 
-  // Page / chunk counters
-  String info = "Pg " + String((unsigned long)(pageIndex + 1)) + "/" + String(maxPg + 1) + "  Ck " +
-                String(currentChunk + 1) + "/" + String(totalCk);
+  // Page / chapter info
+  String info = "Pg " + String((unsigned long)(pageIndex + 1)) + "/" + String(maxPg + 1) + "  Ch " +
+                String(currentChapter + 1) + "/" + String(totalCh);
   u8g2.drawStr(1, 20, info.c_str());
 
   // Progress bar at bottom
@@ -619,13 +504,13 @@ void APP_INIT() {
   initFonts();
   fontStyle = serif;
   fileError = false;
-  currentChunk = 0;
+  currentChapter = 0;
   pageIndex = 0;
 
-  buildOrLoadIndex();
+  scanChapters();
   if (!fileError) {
-    loadBookmark();  // may update currentChunk and pageIndex
-    loadChunk(currentChunk);
+    loadBookmark();  // may update currentChapter and pageIndex
+    loadChapter(currentChapter);
     int mp = getMaxPage();
     if ((int)pageIndex > mp)
       pageIndex = (ulong)mp;
@@ -655,49 +540,50 @@ void processKB_APP() {
     return;
   }
 
-  if (ch == 21) {  // RIGHT arrow (normal) — next page
-    if ((int)pageIndex < getMaxPage()) {
-      pageIndex++;
-      needsRedraw = true;
-    } else if (currentChunk + 1 < (int)chunks.size()) {
-      currentChunk++;
-      pageIndex = 0;
-      saveBookmark();
-      ESP.restart();
+  bool isFN = (KB().getKeyboardState() == FUNC || KB().getKeyboardState() == FN_SHIFT);
+
+  if (ch == '>') {
+    if (isFN) {
+      // Jump to next chapter
+      if (currentChapter + 1 < (int)chapters.size()) {
+        currentChapter++;
+        pageIndex = 0;
+        loadChapter(currentChapter);
+      }
+      KB().setKeyboardState(NORMAL);
+    } else {
+      // Next page, or advance to next chapter if on last page
+      if ((int)pageIndex < getMaxPage()) {
+        pageIndex++;
+        needsRedraw = true;
+      } else if (currentChapter + 1 < (int)chapters.size()) {
+        currentChapter++;
+        pageIndex = 0;
+        loadChapter(currentChapter);
+      }
     }
 
-  } else if (ch == 19) {  // LEFT arrow (normal) — prev page
-    if (pageIndex > 0) {
-      pageIndex--;
-      needsRedraw = true;
-    } else if (currentChunk > 0) {
-      currentChunk--;
-      pageIndex = 65535;  // sentinel: APP_INIT clamps to getMaxPage()
-      saveBookmark();
-      ESP.restart();
+  } else if (ch == '<') {
+    if (isFN) {
+      // Jump to previous chapter
+      if (currentChapter > 0) {
+        currentChapter--;
+        pageIndex = 0;
+        loadChapter(currentChapter);
+      }
+      KB().setKeyboardState(NORMAL);
+    } else {
+      // Prev page, or go to last page of previous chapter
+      if (pageIndex > 0) {
+        pageIndex--;
+        needsRedraw = true;
+      } else if (currentChapter > 0) {
+        currentChapter--;
+        loadChapter(currentChapter);
+        pageIndex = (ulong)getMaxPage();
+        needsRedraw = true;
+      }
     }
-
-  } else if (ch == 6) {  // RIGHT arrow (FN) — next chunk
-    if (currentChunk + 1 < (int)chunks.size()) {
-      currentChunk++;
-      pageIndex = 0;
-      saveBookmark();
-      ESP.restart();
-    }
-    KB().setKeyboardState(NORMAL);
-
-  } else if (ch == 12) {  // LEFT arrow (FN) — prev chunk
-    if (currentChunk > 0) {
-      currentChunk--;
-      pageIndex = 65535;  // sentinel: APP_INIT clamps to getMaxPage()
-      saveBookmark();
-      ESP.restart();
-    }
-    KB().setKeyboardState(NORMAL);
-
-  } else if (KB().getKeyboardState() == FUNC || KB().getKeyboardState() == FN_SHIFT) {
-    // Unrecognized key in FN mode — clear FN state so arrows don't stay broken
-    KB().setKeyboardState(NORMAL);
   }
 }
 
@@ -710,23 +596,20 @@ void einkHandler_APP() {
   display.fillScreen(GxEPD_WHITE);
   display.setTextColor(GxEPD_BLACK);
 
-  if (fileError || chunks.empty() || currentChunk >= (int)chunks.size()) {
+  if (fileError) {
     display.setFont(&FreeSerif9pt7b);
     display.setCursor(10, 30);
-    display.print(fileError ? "Cannot open:" : "No content found");
-    if (fileError) {
-      display.setCursor(10, 50);
-      display.print(BOOK_PATH);
-    }
+    display.print("Cannot open:");
+    display.setCursor(10, 50);
+    display.print(BOOK_PATH);
     EINK().refresh();
+    updateOLED();
     return;
   }
 
-  // Header: chunk heading + separator rule
+  // Header: chapter title + separator rule
   display.setFont(&Font5x7Fixed);
-  String header = chunks[currentChunk].heading;
-  if (header.length() == 0)
-    header = "Chunk " + String(currentChunk + 1);
+  String header = chapters[currentChapter].title;  //
   if ((int)header.length() > 44)
     header = header.substring(0, 43) + "~";
   display.setCursor(4, 11);
