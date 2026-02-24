@@ -1,7 +1,8 @@
 // Book Reader OTA App — PocketMage
-// Place your .md file at /books/book.md on the SD card.
-// Navigation: < / > to page through, FN+< / FN+> to jump chunks.
-// Press ESC to save your position and return to PocketMage OS.
+// Drop .md files into /books/ on the SD card.
+// On launch: select a book with < / >, press Space to open.
+// Reading: < / > to page, FN+< / FN+> to jump chunks, 'b' to return to picker.
+// ESC saves position and returns to PocketMage OS.
 
 #include <SD_MMC.h>
 #include <globals.h>
@@ -9,11 +10,6 @@
 #include <vector>
 
 // ── Configuration ─────────────────────────────────────────────────────────────
-static const char* const BOOK_PATH  = "/books/book.md";
-static const char* const BMARK_DIR  = "/books/.bmarks";
-static const char* const BMARK_PATH = "/books/.bmarks/book.bmark";
-static const char* const IDX_PATH   = "/books/.bmarks/book.idx";
-
 #define SPECIAL_PADDING      20
 #define SPACEWIDTH_SYMBOL    "n"
 #define WORDWIDTH_BUFFER     0
@@ -28,6 +24,65 @@ static const char* const IDX_PATH   = "/books/.bmarks/book.idx";
 #define TEXT_POOL_CAP        10240 // word text bytes for one chunk (~10 KB)
 #define WORD_REF_CAP         4000  // total word references for one chunk
 #define DISPLAY_LINE_CAP     600   // total display lines for one chunk
+
+// ── App mode ──────────────────────────────────────────────────────────────────
+enum AppMode { MODE_PICKER, MODE_READING };
+static AppMode appMode = MODE_PICKER;
+
+// ── Book picker ───────────────────────────────────────────────────────────────
+#define MAX_BOOKS      30
+#define MAX_BOOK_NAME  64
+#define PICKER_VISIBLE 10
+
+static char s_bookNames[MAX_BOOKS][MAX_BOOK_NAME];
+static int  s_bookCount    = 0;
+static int  s_pickerSel    = 0;
+static int  s_pickerScroll = 0;
+
+// ── Paths ─────────────────────────────────────────────────────────────────────
+static const char* const BOOKS_DIR    = "/books";
+static const char* const BMARKS_DIR   = "/books/.bmarks";
+static const char* const CURRENT_PATH = "/books/.current";
+
+static char s_bookPath [96];
+static char s_bmarkPath[96];
+static char s_idxPath  [96];
+
+static void setPaths(const char* fname) {
+  snprintf(s_bookPath, sizeof(s_bookPath), "/books/%s", fname);
+  // Strip .md from base name for bmark/idx files
+  char base[MAX_BOOK_NAME];
+  strncpy(base, fname, sizeof(base) - 1);
+  base[sizeof(base) - 1] = '\0';
+  int len = (int)strlen(base);
+  if (len > 3 && strcmp(base + len - 3, ".md") == 0)
+    base[len - 3] = '\0';
+  snprintf(s_bmarkPath, sizeof(s_bmarkPath), "/books/.bmarks/%s.bmark", base);
+  snprintf(s_idxPath,   sizeof(s_idxPath),   "/books/.bmarks/%s.idx",   base);
+}
+
+// Current-book persistence helpers
+static bool readCurrentBook(char* out, int outLen) {
+  if (!SD_MMC.exists(CURRENT_PATH)) return false;
+  File f = SD_MMC.open(CURRENT_PATH, FILE_READ);
+  if (!f) return false;
+  String s = f.readStringUntil('\n');
+  f.close();
+  s.trim();
+  if (s.length() == 0) return false;
+  strncpy(out, s.c_str(), outLen - 1);
+  out[outLen - 1] = '\0';
+  return true;
+}
+
+static void writeCurrentBook(const char* fname) {
+  File f = SD_MMC.open(CURRENT_PATH, FILE_WRITE);
+  if (f) { f.print(fname); f.close(); }
+}
+
+static void clearCurrentBook() {
+  SD_MMC.remove(CURRENT_PATH);
+}
 
 // ── Font setup ────────────────────────────────────────────────────────────────
 enum FontFamily { serif = 0, sans = 1, mono = 2 };
@@ -135,7 +190,6 @@ static int getMaxPage() {
 
 // ── Layout ────────────────────────────────────────────────────────────────────
 
-// Copy a word into the persistent text pool. Returns pointer or nullptr if full.
 static const char* internWord(const char* src, int len) {
   int copyLen = (len > MAX_WORD_LEN) ? MAX_WORD_LEN : len;
   if (s_textPoolUsed + copyLen + 1 > TEXT_POOL_CAP) return nullptr;
@@ -146,7 +200,6 @@ static const char* internWord(const char* src, int len) {
   return dst;
 }
 
-// Commit the current in-progress display line to the pool.
 static void commitDisplayLine(int wordStart, int wordCount, SourceLine& src) {
   if (s_displayLinesUsed >= DISPLAY_LINE_CAP) return;
   DisplayLine& dl = s_displayLines[s_displayLinesUsed++];
@@ -156,7 +209,6 @@ static void commitDisplayLine(int wordStart, int wordCount, SourceLine& src) {
   src.lineCount++;
 }
 
-// Layout one uniformly-styled text segment into display lines.
 static void layoutSegment(const char* seg, int segLen, bool bold, bool italic,
                           char style, uint16_t textWidth,
                           int& dlWordStart, int& dlWordCount, int& lineWidth,
@@ -196,7 +248,6 @@ static void layoutSegment(const char* seg, int segLen, bool bold, bool italic,
   }
 }
 
-// Parse markdown inline formatting and layout a source line into display lines.
 static void layoutSourceLine(const String& text, char style, ulong orderedListNum) {
   if (s_sourceLinesUsed >= LINES_PER_CHUNK) return;
 
@@ -206,7 +257,6 @@ static void layoutSourceLine(const String& text, char style, ulong orderedListNu
   src.lineStart      = (uint16_t)s_displayLinesUsed;
   src.lineCount      = 0;
 
-  // Blank lines and rules get a scroll slot but no words.
   if (style == 'B' || style == 'H') {
     commitDisplayLine(s_wordRefsUsed, 0, src);
     return;
@@ -268,7 +318,7 @@ static void buildIndex() {
   u8g2.sendBuffer();
 
   chunks.clear();
-  File f = SD_MMC.open(BOOK_PATH, FILE_READ);
+  File f = SD_MMC.open(s_bookPath, FILE_READ);
   if (!f) {
     fileError = true;
     return;
@@ -312,8 +362,8 @@ static void buildIndex() {
   }
   f.close();
 
-  if (!SD_MMC.exists(BMARK_DIR)) SD_MMC.mkdir(BMARK_DIR);
-  File idx = SD_MMC.open(IDX_PATH, FILE_WRITE);
+  if (!SD_MMC.exists(BMARKS_DIR)) SD_MMC.mkdir(BMARKS_DIR);
+  File idx = SD_MMC.open(s_idxPath, FILE_WRITE);
   if (idx) {
     for (auto& ci : chunks) {
       idx.print(String((unsigned long)ci.offset));
@@ -326,8 +376,8 @@ static void buildIndex() {
 }
 
 static bool loadIndex() {
-  if (!SD_MMC.exists(IDX_PATH)) return false;
-  File f = SD_MMC.open(IDX_PATH, FILE_READ);
+  if (!SD_MMC.exists(s_idxPath)) return false;
+  File f = SD_MMC.open(s_idxPath, FILE_READ);
   if (!f) return false;
 
   chunks.clear();
@@ -364,7 +414,7 @@ static void buildOrLoadIndex() {
 static void loadChunk(int idx) {
   if (idx < 0 || idx >= (int)chunks.size()) return;
 
-  File f = SD_MMC.open(BOOK_PATH, FILE_READ);
+  File f = SD_MMC.open(s_bookPath, FILE_READ);
   if (!f) {
     fileError = true;
     return;
@@ -373,7 +423,6 @@ static void loadChunk(int idx) {
   f.seek(chunks[idx].offset);
   size_t endOffset = (idx + 1 < (int)chunks.size()) ? chunks[idx + 1].offset : 0;
 
-  // Reset all layout pools for this chunk
   s_textPoolUsed     = 0;
   s_wordRefsUsed     = 0;
   s_displayLinesUsed = 0;
@@ -432,8 +481,8 @@ static void loadChunk(int idx) {
 
 // ── Bookmarks ─────────────────────────────────────────────────────────────────
 static void loadBookmark() {
-  if (!SD_MMC.exists(BMARK_PATH)) return;
-  File f = SD_MMC.open(BMARK_PATH, FILE_READ);
+  if (!SD_MMC.exists(s_bmarkPath)) return;
+  File f = SD_MMC.open(s_bmarkPath, FILE_READ);
   if (!f) return;
   String data = f.readStringUntil('\n');
   f.close();
@@ -451,42 +500,76 @@ static void loadBookmark() {
 }
 
 static void saveBookmark() {
-  if (!SD_MMC.exists(BMARK_DIR)) SD_MMC.mkdir(BMARK_DIR);
-  File f = SD_MMC.open(BMARK_PATH, FILE_WRITE);
+  if (!SD_MMC.exists(BMARKS_DIR)) SD_MMC.mkdir(BMARKS_DIR);
+  File f = SD_MMC.open(s_bmarkPath, FILE_WRITE);
   if (!f) return;
   f.print(String(currentChunk) + ":" + String((unsigned long)pageIndex));
   f.close();
 }
 
+// ── Book scanning ─────────────────────────────────────────────────────────────
+static void scanBooks() {
+  s_bookCount = 0;
+  File dir = SD_MMC.open(BOOKS_DIR);
+  if (!dir || !dir.isDirectory()) return;
+
+  File entry = dir.openNextFile();
+  while (entry && s_bookCount < MAX_BOOKS) {
+    if (!entry.isDirectory()) {
+      const char* full  = entry.name();
+      const char* slash = strrchr(full, '/');
+      const char* fname = slash ? slash + 1 : full;
+      int flen = (int)strlen(fname);
+      if (flen > 3 && strcmp(fname + flen - 3, ".md") == 0) {
+        strncpy(s_bookNames[s_bookCount], fname, MAX_BOOK_NAME - 1);
+        s_bookNames[s_bookCount][MAX_BOOK_NAME - 1] = '\0';
+        s_bookCount++;
+      }
+    }
+    entry.close();
+    entry = dir.openNextFile();
+  }
+  dir.close();
+}
+
 // ── OLED update ───────────────────────────────────────────────────────────────
 static void updateOLED() {
-  if (chunks.empty() || currentChunk >= (int)chunks.size()) return;
-  int totalCk = (int)chunks.size();
-  int maxPg   = getMaxPage();
-
-  float progress =
-      (totalCk <= 1)
-          ? (maxPg > 0 ? (float)pageIndex / (float)maxPg : 1.0f)
-          : ((float)currentChunk + (maxPg > 0 ? (float)pageIndex / (float)maxPg : 1.0f)) /
-                (float)totalCk;
-  progress = constrain(progress, 0.0f, 1.0f);
-  int barFill = (int)(253.0f * progress);
-
   u8g2.clearBuffer();
-  u8g2.setDrawColor(1);
   u8g2.setFont(u8g2_font_5x7_tf);
 
-  String title = chunks[currentChunk].heading;
-  if (title.length() == 0) title = "Chunk " + String(currentChunk + 1);
-  if ((int)title.length() > 36) title = title.substring(0, 35) + "~";
-  u8g2.drawStr(1, 9, title.c_str());
+  if (appMode == MODE_PICKER) {
+    u8g2.drawStr(1, 9, "Book Reader");
+    char hint[48];
+    snprintf(hint, sizeof(hint), "< > select  SPC open  (%d books)", s_bookCount);
+    u8g2.drawStr(1, 20, hint);
+  } else {
+    if (chunks.empty() || currentChunk >= (int)chunks.size()) {
+      u8g2.sendBuffer();
+      return;
+    }
+    int totalCk = (int)chunks.size();
+    int maxPg   = getMaxPage();
 
-  String info = "Pg " + String((unsigned long)(pageIndex + 1)) + "/" + String(maxPg + 1) +
-                "  Ck " + String(currentChunk + 1) + "/" + String(totalCk);
-  u8g2.drawStr(1, 20, info.c_str());
+    float progress =
+        (totalCk <= 1)
+            ? (maxPg > 0 ? (float)pageIndex / (float)maxPg : 1.0f)
+            : ((float)currentChunk + (maxPg > 0 ? (float)pageIndex / (float)maxPg : 1.0f)) /
+                  (float)totalCk;
+    progress = constrain(progress, 0.0f, 1.0f);
+    int barFill = (int)(253.0f * progress);
 
-  u8g2.drawFrame(0, 25, 256, 7);
-  if (barFill > 0) u8g2.drawBox(1, 26, min(barFill, 254), 5);
+    String title = chunks[currentChunk].heading;
+    if (title.length() == 0) title = "Chunk " + String(currentChunk + 1);
+    if ((int)title.length() > 36) title = title.substring(0, 35) + "~";
+    u8g2.drawStr(1, 9, title.c_str());
+
+    String info = "Pg " + String((unsigned long)(pageIndex + 1)) + "/" + String(maxPg + 1) +
+                  "  Ck " + String(currentChunk + 1) + "/" + String(totalCk);
+    u8g2.drawStr(1, 20, info.c_str());
+
+    u8g2.drawFrame(0, 25, 256, 7);
+    if (barFill > 0) u8g2.drawBox(1, 26, min(barFill, 254), 5);
+  }
 
   u8g2.sendBuffer();
 }
@@ -496,7 +579,6 @@ static int renderSourceLine(int si, int startX, int startY) {
   const SourceLine& src   = s_sourceLines[si];
   char              style = src.style;
 
-  // Early-out: entire source line is before the scroll window
   if (src.lineCount > 0 &&
       s_displayLines[src.lineStart + src.lineCount - 1].scrollIdx < lineScroll)
     return 0;
@@ -525,7 +607,6 @@ static int renderSourceLine(int si, int startX, int startY) {
     int      cx      = drawX;
     uint16_t max_hpx = 0;
 
-    // First pass: measure tallest glyph on this display line
     for (int wi = dl.wordStart; wi < dl.wordStart + dl.wordCount; wi++) {
       const WordRef& w = s_wordRefs[wi];
       display.setFont(pickFont(style, w.bold, w.italic));
@@ -536,7 +617,6 @@ static int renderSourceLine(int si, int startX, int startY) {
     }
     if (style == '1' || style == '2' || style == '3') max_hpx += 4;
 
-    // Second pass: render
     for (int wi = dl.wordStart; wi < dl.wordStart + dl.wordCount; wi++) {
       const WordRef& w = s_wordRefs[wi];
       display.setFont(pickFont(style, w.bold, w.italic));
@@ -554,7 +634,6 @@ static int renderSourceLine(int si, int startX, int startY) {
     cursorY += (int)max_hpx + (int)pad;
   }
 
-  // Post-render decorations
   if (style == '>') {
     display.drawFastVLine(SPECIAL_PADDING / 2, startY, cursorY - startY, GxEPD_BLACK);
     display.drawFastVLine(SPECIAL_PADDING / 2 + 1, startY, cursorY - startY, GxEPD_BLACK);
@@ -600,30 +679,90 @@ void APP_INIT() {
   fileError    = false;
   currentChunk = 0;
   pageIndex    = 0;
+  needsRedraw  = true;
 
-  buildOrLoadIndex();
-  if (!fileError) {
-    loadBookmark();  // may update currentChunk and pageIndex
-    loadChunk(currentChunk);
-    int mp = getMaxPage();
-    if ((int)pageIndex > mp)
-      pageIndex = (ulong)mp;
+  // Check if a book was previously selected
+  char fname[MAX_BOOK_NAME] = "";
+  if (readCurrentBook(fname, sizeof(fname))) {
+    char checkPath[96];
+    snprintf(checkPath, sizeof(checkPath), "/books/%s", fname);
+    if (SD_MMC.exists(checkPath)) {
+      setPaths(fname);
+      appMode = MODE_READING;
+      buildOrLoadIndex();
+      if (!fileError) {
+        loadBookmark();
+        loadChunk(currentChunk);
+        int mp = getMaxPage();
+        if ((int)pageIndex > mp) pageIndex = (ulong)mp;
+      }
+      return;
+    }
+    // File no longer exists — fall through to picker
+    clearCurrentBook();
   }
-  needsRedraw = true;
+
+  // Picker mode: scan for .md files
+  appMode = MODE_PICKER;
+  scanBooks();
+  s_pickerSel    = 0;
+  s_pickerScroll = 0;
+
+  // Auto-select if only one book
+  if (s_bookCount == 1) {
+    writeCurrentBook(s_bookNames[0]);
+    ESP.restart();
+  }
+
+  updateOLED();
 }
 
 void processKB_APP() {
   char ch = KB().updateKeypress();
   if (!ch) return;
 
-  // ESC or A: save bookmark and return to OS
-  if (ch == 27 || ch == 65) {
+  if (appMode == MODE_PICKER) {
+    if (ch == 27 || ch == 65) {  // ESC or A — exit to OS
+      rebootToPocketMage();
+      return;
+    }
+    if (ch == 21) {  // RIGHT — next book in list
+      if (s_pickerSel < s_bookCount - 1) {
+        s_pickerSel++;
+        if (s_pickerSel >= s_pickerScroll + PICKER_VISIBLE)
+          s_pickerScroll = s_pickerSel - PICKER_VISIBLE + 1;
+        needsRedraw = true;
+      }
+    } else if (ch == 19) {  // LEFT — prev book in list
+      if (s_pickerSel > 0) {
+        s_pickerSel--;
+        if (s_pickerSel < s_pickerScroll)
+          s_pickerScroll = s_pickerSel;
+        needsRedraw = true;
+      }
+    } else if (ch == 32 || ch == 13) {  // Space or Enter — open selected book
+      if (s_bookCount > 0) {
+        writeCurrentBook(s_bookNames[s_pickerSel]);
+        ESP.restart();
+      }
+    }
+    return;
+  }
+
+  // ── Reading mode ────────────────────────────────────────────────────────────
+  if (ch == 27 || ch == 65) {  // ESC or A — save & return to OS (keeps .current)
     saveBookmark();
     rebootToPocketMage();
     return;
   }
 
-  // Modifier toggles
+  if (ch == 'b' || ch == 'B') {  // bookmark and return to picker
+    saveBookmark();
+    clearCurrentBook();
+    ESP.restart();
+    return;
+  }
+
   if (ch == 17) {  // SHIFT
     KB().setKeyboardState(KB().getKeyboardState() == SHIFT ? NORMAL : SHIFT);
     return;
@@ -633,7 +772,7 @@ void processKB_APP() {
     return;
   }
 
-  if (ch == 21) {  // RIGHT arrow (normal) — next page
+  if (ch == 21) {  // RIGHT — next page
     if ((int)pageIndex < getMaxPage()) {
       pageIndex++;
       needsRedraw = true;
@@ -644,7 +783,7 @@ void processKB_APP() {
       ESP.restart();
     }
 
-  } else if (ch == 19) {  // LEFT arrow (normal) — prev page
+  } else if (ch == 19) {  // LEFT — prev page
     if (pageIndex > 0) {
       pageIndex--;
       needsRedraw = true;
@@ -655,7 +794,7 @@ void processKB_APP() {
       ESP.restart();
     }
 
-  } else if (ch == 6) {  // RIGHT arrow (FN) — next chunk
+  } else if (ch == 6) {  // RIGHT (FN) — next chunk
     if (currentChunk + 1 < (int)chunks.size()) {
       currentChunk++;
       pageIndex = 0;
@@ -664,17 +803,16 @@ void processKB_APP() {
     }
     KB().setKeyboardState(NORMAL);
 
-  } else if (ch == 12) {  // LEFT arrow (FN) — prev chunk
+  } else if (ch == 12) {  // LEFT (FN) — prev chunk
     if (currentChunk > 0) {
       currentChunk--;
-      pageIndex = 65535;  // sentinel: APP_INIT clamps to getMaxPage()
+      pageIndex = 65535;
       saveBookmark();
       ESP.restart();
     }
     KB().setKeyboardState(NORMAL);
 
   } else if (KB().getKeyboardState() == FUNC || KB().getKeyboardState() == FN_SHIFT) {
-    // Unrecognized key in FN mode — clear FN state so arrows don't stay broken
     KB().setKeyboardState(NORMAL);
   }
 }
@@ -687,19 +825,63 @@ void einkHandler_APP() {
   display.fillScreen(GxEPD_WHITE);
   display.setTextColor(GxEPD_BLACK);
 
+  if (appMode == MODE_PICKER) {
+    // Header
+    display.setFont(&Font5x7Fixed);
+    display.setCursor(4, 11);
+    display.print("Books");
+    display.drawFastHLine(0, 14, display.width(), GxEPD_BLACK);
+
+    if (s_bookCount == 0) {
+      display.setFont(&FreeSerif9pt7b);
+      display.setCursor(10, 50);
+      display.print("No .md files found in /books/");
+    } else {
+      display.setFont(&FreeSerif9pt7b);
+      int lineH = 20;
+      int y     = 14 + lineH;  // first item baseline
+      for (int i = s_pickerScroll;
+           i < s_bookCount && i < s_pickerScroll + PICKER_VISIBLE;
+           i++) {
+        if (i == s_pickerSel) {
+          display.fillRect(0, y - lineH + 2, display.width(), lineH, GxEPD_BLACK);
+          display.setTextColor(GxEPD_WHITE);
+        } else {
+          display.setTextColor(GxEPD_BLACK);
+        }
+        // Show name without .md extension
+        char displayName[MAX_BOOK_NAME];
+        strncpy(displayName, s_bookNames[i], sizeof(displayName) - 1);
+        displayName[sizeof(displayName) - 1] = '\0';
+        int dlen = (int)strlen(displayName);
+        if (dlen > 3 && strcmp(displayName + dlen - 3, ".md") == 0)
+          displayName[dlen - 3] = '\0';
+        display.setCursor(6, y);
+        display.print(displayName);
+        y += lineH;
+      }
+      display.setTextColor(GxEPD_BLACK);
+    }
+
+    // Footer hint
+    display.setFont(&Font5x7Fixed);
+    display.setCursor(2, display.height() - 2);
+    display.print("< > navigate   SPC open   ESC exit");
+
+    EINK().refresh();
+    updateOLED();
+    return;
+  }
+
+  // ── Reading mode render ──────────────────────────────────────────────────────
   if (fileError || chunks.empty() || currentChunk >= (int)chunks.size()) {
     display.setFont(&FreeSerif9pt7b);
     display.setCursor(10, 30);
-    display.print(fileError ? "Cannot open:" : "No content found");
-    if (fileError) {
-      display.setCursor(10, 50);
-      display.print(BOOK_PATH);
-    }
+    display.print(fileError ? "Cannot open book file" : "No content found");
     EINK().refresh();
     return;
   }
 
-  // Header: chunk heading + separator rule
   display.setFont(&Font5x7Fixed);
   String header = chunks[currentChunk].heading;
   if (header.length() == 0) header = "Chunk " + String(currentChunk + 1);
@@ -708,7 +890,6 @@ void einkHandler_APP() {
   display.print(header);
   display.drawFastHLine(0, 14, display.width(), GxEPD_BLACK);
 
-  // Body content
   renderDocument(4, CONTENT_START_Y);
 
   EINK().refresh();
