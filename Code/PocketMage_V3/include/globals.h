@@ -8,7 +8,7 @@
 #include <freertos/task.h>
 #include <pocketmage.h>
 // OTA_APP: remove assets.h + assets.cpp, and OS_APPS/, follow OTA_APP: tag instructions in codebase
-#include <assets.h> // OTA_APP: remove
+
 
 
 // ===================== SYSTEM STATE =====================

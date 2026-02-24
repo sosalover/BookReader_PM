@@ -69,30 +69,8 @@ void processKB() {
   // Displays a progress bar and then reboots to PocketMage OS
   // Remove this when making a real OTA APP + uncomment processKB_APP();
   #if OTA_APP
-    static int x = 0;
-    ESP_LOGD(TAG, "OTA APP MODE - PROGRESS: %d\n", x);
-    // Draw a progress bar across the screen and then return to PocketMage OS
-    u8g2.clearBuffer();
-    u8g2.drawBox(0,0,x,u8g2.getDisplayHeight());
-    
-    x+=5;
-    
-    if (x > u8g2.getDisplayWidth()) {
-      // Return to pocketMage OS
-      rebootToPocketMage();
-      // OTA_APP: reboot method that sets reboot flag instead of direct reboot
-      // pocketmage::checkRebootOTA();   // alternative method for testing OTA_APP rebooting
-      // prefs.begin("PocketMage", false);
-      // prefs.putBool("OTA_Reboot", true);
-      // prefs.end();
-      // pocketmage::deepSleep();
-    }
-
-    u8g2.sendBuffer();
-    delay(10);
-    #if OTA_APP
-    processKB_APP(); // OTA_APP: entry point
-    #endif
+    // OTA apps fully own behavior
+    processKB_APP();
     return;
   #endif
   // OTA_APP: Remove switch statement
@@ -148,6 +126,9 @@ void processKB() {
 // SETUP
 void setup() {
   PocketMage_INIT();
+  #if OTA_APP
+  APP_INIT();
+  #endif
 }
 
 // Keyboard / OLED Loop
