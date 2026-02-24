@@ -9,21 +9,25 @@
 #include <vector>
 
 // ── Configuration ─────────────────────────────────────────────────────────────
-static const char* const BOOK_PATH = "/books/book.md";
-static const char* const BMARK_DIR = "/books/.bmarks";
+static const char* const BOOK_PATH  = "/books/book.md";
+static const char* const BMARK_DIR  = "/books/.bmarks";
 static const char* const BMARK_PATH = "/books/.bmarks/book.bmark";
-static const char* const IDX_PATH = "/books/.bmarks/book.idx";
+static const char* const IDX_PATH   = "/books/.bmarks/book.idx";
 
-#define SPECIAL_PADDING 20
-#define SPACEWIDTH_SYMBOL "n"
-#define WORDWIDTH_BUFFER 0
+#define SPECIAL_PADDING      20
+#define SPACEWIDTH_SYMBOL    "n"
+#define WORDWIDTH_BUFFER     0
 #define DISPLAY_WIDTH_BUFFER 14
 #define HEADING_LINE_PADDING 8
-#define NORMAL_LINE_PADDING 4
-#define LINES_PER_PAGE 12
-#define CONTENT_START_Y 20
-#define LINES_PER_CHUNK 100  // lines per chunk; also hard cap during load
-#define MIN_FREE_HEAP 35000  // bail out of loading if heap drops below this
+#define NORMAL_LINE_PADDING  4
+#define LINES_PER_PAGE       12
+#define CONTENT_START_Y      20
+#define LINES_PER_CHUNK      100   // source lines per chunk
+
+#define MAX_WORD_LEN         63    // max chars per word stored in text pool
+#define TEXT_POOL_CAP        10240 // word text bytes for one chunk (~10 KB)
+#define WORD_REF_CAP         4000  // total word references for one chunk
+#define DISPLAY_LINE_CAP     600   // total display lines for one chunk
 
 // ── Font setup ────────────────────────────────────────────────────────────────
 enum FontFamily { serif = 0, sans = 1, mono = 2 };
@@ -48,277 +52,216 @@ struct FontMap {
 static FontMap fonts[3];
 
 static void initFonts() {
-  fonts[serif].normal = &FreeSerif9pt7b;
-  fonts[serif].normal_B = &FreeSerifBold9pt7b;
-  fonts[serif].normal_I = &FreeSerif9pt7b;  // italic fallback
+  fonts[serif].normal    = &FreeSerif9pt7b;
+  fonts[serif].normal_B  = &FreeSerifBold9pt7b;
+  fonts[serif].normal_I  = &FreeSerif9pt7b;  // italic fallback
   fonts[serif].normal_BI = &FreeSerifBold9pt7b;
-  fonts[serif].h1 = &FreeSerif12pt7b;
-  fonts[serif].h1_B = &FreeSerif12pt7b;
-  fonts[serif].h2 = &FreeSerifBold9pt7b;
-  fonts[serif].h2_B = &FreeSerifBold9pt7b;
-  fonts[serif].h3 = &FreeSerif9pt7b;
-  fonts[serif].h3_B = &FreeSerifBold9pt7b;
-  fonts[serif].code = &FreeMonoBold9pt7b;
-  fonts[serif].quote = &FreeSerif9pt7b;
-  fonts[serif].list = &FreeSerif9pt7b;
+  fonts[serif].h1        = &FreeSerif12pt7b;
+  fonts[serif].h1_B      = &FreeSerif12pt7b;
+  fonts[serif].h2        = &FreeSerifBold9pt7b;
+  fonts[serif].h2_B      = &FreeSerifBold9pt7b;
+  fonts[serif].h3        = &FreeSerif9pt7b;
+  fonts[serif].h3_B      = &FreeSerifBold9pt7b;
+  fonts[serif].code      = &FreeMonoBold9pt7b;
+  fonts[serif].quote     = &FreeSerif9pt7b;
+  fonts[serif].list      = &FreeSerif9pt7b;
 }
 
 static const GFXfont* pickFont(char style, bool bold, bool italic) {
   FontMap& fm = fonts[fontStyle];
   switch (style) {
-    case '1':
-      return bold ? fm.h1_B : fm.h1;
-    case '2':
-      return bold ? fm.h2_B : fm.h2;
-    case '3':
-      return bold ? fm.h3_B : fm.h3;
-    case 'C':
-      return fm.code;
-    case '>':
-      return fm.quote;
-    case '-':
-      return fm.list;
-    case 'L':
-      return fm.list;
+    case '1': return bold ? fm.h1_B : fm.h1;
+    case '2': return bold ? fm.h2_B : fm.h2;
+    case '3': return bold ? fm.h3_B : fm.h3;
+    case 'C': return fm.code;
+    case '>': return fm.quote;
+    case '-': return fm.list;
+    case 'L': return fm.list;
     default:
-      if (bold && italic)
-        return fm.normal_BI;
-      if (bold)
-        return fm.normal_B;
-      if (italic)
-        return fm.normal_I;
+      if (bold && italic) return fm.normal_BI;
+      if (bold)           return fm.normal_B;
+      if (italic)         return fm.normal_I;
       return fm.normal;
   }
 }
 
-// ── Data structures ───────────────────────────────────────────────────────────
-struct wordObject {
-  String text;
-  bool bold = false;
-  bool italic = false;
+// ── Layout pools (all static — zero heap in rendering pipeline) ──────────────
+struct WordRef {
+  const char* text;
+  bool        bold;
+  bool        italic;
 };
 
-struct LineObject {
-  ulong index;
-  std::vector<wordObject> words;
+struct DisplayLine {
+  ulong    scrollIdx;
+  uint16_t wordStart;
+  uint8_t  wordCount;
 };
 
-static ulong indexCounter = 0;
-static ulong lineScroll = 0;
-
-struct DocLine {
-  char style = 'T';
-  String line;
-  std::vector<wordObject> words;
-  std::vector<LineObject> lines;
-  ulong orderedListNumber = 0;
-
-  void parseWords() {
-    words.clear();
-    int i = 0;
-    while (i < (int)line.length()) {
-      if (line[i] == '*' && i + 1 < (int)line.length() && line[i + 1] == '*') {
-        int end = line.indexOf("**", i + 2);
-        if (end < 0)
-          end = line.length();
-        splitIntoWords(line.substring(i + 2, end), true, false);
-        i = end + 2;
-      } else if (line[i] == '*') {
-        int end = line.indexOf("*", i + 1);
-        if (end < 0)
-          end = line.length();
-        splitIntoWords(line.substring(i + 1, end), false, true);
-        i = end + 1;
-      } else {
-        int nextBold = line.indexOf("**", i);
-        int nextItalic = line.indexOf("*", i);
-        int end = line.length();
-        if (nextBold >= 0)
-          end = min(end, nextBold);
-        if (nextItalic >= 0)
-          end = min(end, nextItalic);
-        splitIntoWords(line.substring(i, end), false, false);
-        i = end;
-      }
-    }
-  }
-
-  void splitToLines() {
-    uint16_t textWidth = (uint16_t)(display.width() - DISPLAY_WIDTH_BUFFER);
-    if (style == '>' || style == 'C')
-      textWidth -= SPECIAL_PADDING;
-    else if (style == '-' || style == 'L')
-      textWidth -= 2 * SPECIAL_PADDING;
-
-    lines.clear();
-    LineObject current;
-    int lineWidth = 0;
-
-    for (auto& w : words) {
-      display.setFont(pickFont(style, w.bold, w.italic));
-      int16_t x1, y1;
-      uint16_t wpx, hpx, sw, sh;
-      display.getTextBounds(w.text.c_str(), 0, 0, &x1, &y1, &wpx, &hpx);
-      display.getTextBounds(SPACEWIDTH_SYMBOL, 0, 0, &x1, &y1, &sw, &sh);
-      int addWidth = (int)wpx + (int)sw + WORDWIDTH_BUFFER;
-
-      if (lineWidth > 0 && (lineWidth + addWidth > (int)textWidth)) {
-        current.index = indexCounter++;
-        lines.push_back(current);
-        current.words.clear();
-        lineWidth = 0;
-      }
-      current.words.push_back(w);
-      lineWidth += addWidth;
-    }
-    if (!current.words.empty()) {
-      current.index = indexCounter++;
-      lines.push_back(current);
-    }
-    // Blank lines and rules have no words but still occupy vertical space.
-    // Give them a scroll slot so they get skipped on later pages.
-    if (lines.empty() && (style == 'B' || style == 'H')) {
-      current.index = indexCounter++;
-      lines.push_back(current);
-    }
-  }
-
-  // Returns pixel height used
-  int displayLine(int startX, int startY) {
-    ulong scroll = lineScroll;
-    int cursorY = startY;
-
-    if (!lines.empty() && lines.back().index < scroll)
-      return 0;
-
-    if (style == 'H') {
-      display.drawFastHLine(0, cursorY + 3, display.width(), GxEPD_BLACK);
-      display.drawFastHLine(0, cursorY + 4, display.width(), GxEPD_BLACK);
-      return 8;
-    }
-    if (style == 'B')
-      return 12;
-
-    int drawX = startX;
-    if (style == '>')
-      drawX += SPECIAL_PADDING;
-    else if (style == '-' || style == 'L')
-      drawX += 2 * SPECIAL_PADDING;
-    else if (style == 'C')
-      drawX += SPECIAL_PADDING / 2;
-
-    for (auto& ln : lines) {
-      if (ln.index < scroll)
-        continue;
-
-      int cx = drawX;
-      uint16_t max_hpx = 0;
-
-      for (auto& w : ln.words) {
-        display.setFont(pickFont(style, w.bold, w.italic));
-        int16_t x1, y1;
-        uint16_t wpx, hpx;
-        display.getTextBounds(w.text.c_str(), cx, cursorY, &x1, &y1, &wpx, &hpx);
-        if (hpx > max_hpx)
-          max_hpx = hpx;
-      }
-      if (style == '1' || style == '2' || style == '3')
-        max_hpx += 4;
-
-      for (auto& w : ln.words) {
-        display.setFont(pickFont(style, w.bold, w.italic));
-        int16_t x1, y1;
-        uint16_t wpx, hpx, sw, sh;
-        display.getTextBounds(w.text.c_str(), cx, cursorY, &x1, &y1, &wpx, &hpx);
-        display.getTextBounds(SPACEWIDTH_SYMBOL, cx, cursorY, &x1, &y1, &sw, &sh);
-        display.setCursor(cx, cursorY + max_hpx);
-        display.print(w.text);
-        cx += (int)wpx + (int)sw;
-      }
-
-      uint8_t pad = (style == '1' || style == '2' || style == '3') ? HEADING_LINE_PADDING
-                                                                   : NORMAL_LINE_PADDING;
-      cursorY += (int)max_hpx + (int)pad;
-    }
-
-    // Post-render decorations
-    if (style == '>') {
-      display.drawFastVLine(SPECIAL_PADDING / 2, startY, cursorY - startY, GxEPD_BLACK);
-      display.drawFastVLine(SPECIAL_PADDING / 2 + 1, startY, cursorY - startY, GxEPD_BLACK);
-    } else if (style == 'C') {
-      display.drawFastVLine(SPECIAL_PADDING / 4, startY, cursorY - startY, GxEPD_BLACK);
-      display.drawFastVLine(SPECIAL_PADDING / 4 + 1, startY, cursorY - startY, GxEPD_BLACK);
-      display.drawFastVLine(display.width() - SPECIAL_PADDING / 4, startY, cursorY - startY,
-                            GxEPD_BLACK);
-      display.drawFastVLine(display.width() - SPECIAL_PADDING / 4 - 1, startY, cursorY - startY,
-                            GxEPD_BLACK);
-    } else if (style == '1' || style == '2' || style == '3') {
-      display.drawFastHLine(0, cursorY - 2, display.width(), GxEPD_BLACK);
-      display.drawFastHLine(0, cursorY - 3, display.width(), GxEPD_BLACK);
-    } else if (style == '-') {
-      display.fillCircle(drawX - 8, startY + 8, 3, GxEPD_BLACK);
-    } else if (style == 'L') {
-      String num = String(orderedListNumber) + ". ";
-      display.setFont(pickFont('T', false, false));
-      int16_t x1, y1;
-      uint16_t wpx, hpx;
-      display.getTextBounds(num.c_str(), 0, 0, &x1, &y1, &wpx, &hpx);
-      display.setCursor(drawX - (int)wpx - 5, startY + (int)hpx);
-      display.print(num.c_str());
-    }
-
-    return cursorY - startY;
-  }
-
- private:
-  void splitIntoWords(const String& seg, bool bold, bool italic) {
-    int start = 0;
-    while (start < (int)seg.length()) {
-      int sp = seg.indexOf(' ', start);
-      if (sp < 0)
-        sp = seg.length();
-      String word = seg.substring(start, sp);
-      if (word.length() > 0) {
-        wordObject wo;
-        wo.text = word;
-        wo.bold = bold;
-        wo.italic = italic;
-        words.push_back(wo);
-      }
-      start = sp + 1;
-    }
-  }
+struct SourceLine {
+  char     style;
+  uint16_t lineStart;
+  uint8_t  lineCount;
+  ulong    orderedListNum;
 };
+
+static char        s_textPool[TEXT_POOL_CAP];
+static int         s_textPoolUsed     = 0;
+static WordRef     s_wordRefs[WORD_REF_CAP];
+static int         s_wordRefsUsed     = 0;
+static DisplayLine s_displayLines[DISPLAY_LINE_CAP];
+static int         s_displayLinesUsed = 0;
+static SourceLine  s_sourceLines[LINES_PER_CHUNK];
+static int         s_sourceLinesUsed  = 0;
+static ulong       s_scrollCounter    = 0;
+static ulong       lineScroll         = 0;
 
 // ── Chunk index ────────────────────────────────────────────────────────────────
 struct ChunkInfo {
-  size_t offset;   // byte position in file where this chunk starts
-  String heading;  // first # heading seen in/before this chunk (may be empty)
+  size_t offset;
+  String heading;
 };
 
 static std::vector<ChunkInfo> chunks;
-static std::vector<DocLine> docLines;
-static int currentChunk = 0;
-static ulong pageIndex = 0;
-static bool needsRedraw = false;  // set true by APP_INIT after loading completes
-static bool fileError = false;
+static int   currentChunk = 0;
+static ulong pageIndex    = 0;
+static bool  needsRedraw  = false;
+static bool  fileError    = false;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-static int getTotalDisplayLines() {
-  int n = 0;
-  for (const auto& d : docLines)
-    n += (int)d.lines.size();
-  return n;
+static int getMaxPage() {
+  return (s_displayLinesUsed <= 0) ? 0 : (s_displayLinesUsed - 1) / LINES_PER_PAGE;
 }
 
-static int getMaxPage() {
-  int total = getTotalDisplayLines();
-  return (total <= 0) ? 0 : (total - 1) / LINES_PER_PAGE;
+// ── Layout ────────────────────────────────────────────────────────────────────
+
+// Copy a word into the persistent text pool. Returns pointer or nullptr if full.
+static const char* internWord(const char* src, int len) {
+  int copyLen = (len > MAX_WORD_LEN) ? MAX_WORD_LEN : len;
+  if (s_textPoolUsed + copyLen + 1 > TEXT_POOL_CAP) return nullptr;
+  char* dst = s_textPool + s_textPoolUsed;
+  memcpy(dst, src, copyLen);
+  dst[copyLen] = '\0';
+  s_textPoolUsed += copyLen + 1;
+  return dst;
+}
+
+// Commit the current in-progress display line to the pool.
+static void commitDisplayLine(int wordStart, int wordCount, SourceLine& src) {
+  if (s_displayLinesUsed >= DISPLAY_LINE_CAP) return;
+  DisplayLine& dl = s_displayLines[s_displayLinesUsed++];
+  dl.scrollIdx = s_scrollCounter++;
+  dl.wordStart = (uint16_t)wordStart;
+  dl.wordCount = (uint8_t)(wordCount > 255 ? 255 : wordCount);
+  src.lineCount++;
+}
+
+// Layout one uniformly-styled text segment into display lines.
+static void layoutSegment(const char* seg, int segLen, bool bold, bool italic,
+                          char style, uint16_t textWidth,
+                          int& dlWordStart, int& dlWordCount, int& lineWidth,
+                          SourceLine& src) {
+  display.setFont(pickFont(style, bold, italic));
+  int16_t  x1, y1;
+  uint16_t sw, sh;
+  display.getTextBounds(SPACEWIDTH_SYMBOL, 0, 0, &x1, &y1, &sw, &sh);
+
+  int wStart = 0;
+  while (wStart < segLen) {
+    int wEnd = wStart;
+    while (wEnd < segLen && seg[wEnd] != ' ') wEnd++;
+    int wLen = wEnd - wStart;
+    if (wLen > 0) {
+      const char* wordText = internWord(seg + wStart, wLen);
+      if (!wordText || s_wordRefsUsed >= WORD_REF_CAP) return;
+
+      uint16_t wpx, hpx;
+      display.getTextBounds(wordText, 0, 0, &x1, &y1, &wpx, &hpx);
+      int addWidth = (int)wpx + (int)sw + WORDWIDTH_BUFFER;
+
+      if (lineWidth > 0 && lineWidth + addWidth > (int)textWidth) {
+        commitDisplayLine(dlWordStart, dlWordCount, src);
+        dlWordStart = s_wordRefsUsed;
+        dlWordCount = 0;
+        lineWidth   = 0;
+      }
+      s_wordRefs[s_wordRefsUsed].text   = wordText;
+      s_wordRefs[s_wordRefsUsed].bold   = bold;
+      s_wordRefs[s_wordRefsUsed].italic = italic;
+      s_wordRefsUsed++;
+      dlWordCount++;
+      lineWidth += addWidth;
+    }
+    wStart = wEnd + 1;
+  }
+}
+
+// Parse markdown inline formatting and layout a source line into display lines.
+static void layoutSourceLine(const String& text, char style, ulong orderedListNum) {
+  if (s_sourceLinesUsed >= LINES_PER_CHUNK) return;
+
+  SourceLine& src    = s_sourceLines[s_sourceLinesUsed++];
+  src.style          = style;
+  src.orderedListNum = orderedListNum;
+  src.lineStart      = (uint16_t)s_displayLinesUsed;
+  src.lineCount      = 0;
+
+  // Blank lines and rules get a scroll slot but no words.
+  if (style == 'B' || style == 'H') {
+    commitDisplayLine(s_wordRefsUsed, 0, src);
+    return;
+  }
+
+  uint16_t textWidth = (uint16_t)(display.width() - DISPLAY_WIDTH_BUFFER);
+  if (style == '>' || style == 'C')
+    textWidth -= SPECIAL_PADDING;
+  else if (style == '-' || style == 'L')
+    textWidth -= 2 * SPECIAL_PADDING;
+
+  int dlWordStart = s_wordRefsUsed;
+  int dlWordCount = 0;
+  int lineWidth   = 0;
+
+  const char* raw = text.c_str();
+  int n = (int)text.length();
+  int i = 0;
+  while (i < n) {
+    bool bold = false, italic = false;
+    int segStart, segEnd;
+
+    if (raw[i] == '*' && i + 1 < n && raw[i + 1] == '*') {
+      bold     = true;
+      segStart = i + 2;
+      const char* e = strstr(raw + segStart, "**");
+      segEnd = e ? (int)(e - raw) : n;
+      i      = segEnd + 2;
+    } else if (raw[i] == '*') {
+      italic   = true;
+      segStart = i + 1;
+      const char* e = strchr(raw + segStart, '*');
+      segEnd = e ? (int)(e - raw) : n;
+      i      = segEnd + 1;
+    } else {
+      const char* nb = strstr(raw + i, "**");
+      const char* ni = strchr(raw + i, '*');
+      segStart = i;
+      segEnd   = n;
+      if (nb) segEnd = min(segEnd, (int)(nb - raw));
+      if (ni) segEnd = min(segEnd, (int)(ni - raw));
+      i = segEnd;
+    }
+
+    if (segEnd > segStart)
+      layoutSegment(raw + segStart, segEnd - segStart, bold, italic,
+                    style, textWidth, dlWordStart, dlWordCount, lineWidth, src);
+  }
+
+  if (dlWordCount > 0)
+    commitDisplayLine(dlWordStart, dlWordCount, src);
 }
 
 // ── Index building ─────────────────────────────────────────────────────────────
 static void buildIndex() {
-  // Show progress on OLED during (potentially slow) scan
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_5x7_tf);
   u8g2.drawStr(1, 9, "Indexing...");
@@ -331,35 +274,28 @@ static void buildIndex() {
     return;
   }
 
-  char headBuf[64] = "";  // last # heading seen
+  char headBuf[64] = "";
   int lineCount = 0;
 
-  // First chunk always starts at byte 0
   ChunkInfo first;
-  first.offset = 0;
+  first.offset  = 0;
   first.heading = "";
   chunks.push_back(first);
 
   while (f.available()) {
-    // Read line byte-by-byte — zero heap allocation per line
     char buf[256];
     int len = 0;
     while (f.available() && len < 255) {
       char c = (char)f.read();
-      if (c == '\n')
-        break;
+      if (c == '\n') break;
       buf[len++] = c;
     }
     buf[len] = '\0';
-    // Strip trailing \r for Windows line endings
-    if (len > 0 && buf[len - 1] == '\r')
-      buf[--len] = '\0';
+    if (len > 0 && buf[len - 1] == '\r') buf[--len] = '\0';
 
-    // Capture first-level heading; label current chunk if still unlabeled
     if (buf[0] == '#' && buf[1] == ' ') {
       size_t hlen = strlen(buf + 2);
-      if (hlen >= sizeof(headBuf))
-        hlen = sizeof(headBuf) - 1;
+      if (hlen >= sizeof(headBuf)) hlen = sizeof(headBuf) - 1;
       memcpy(headBuf, buf + 2, hlen);
       headBuf[hlen] = '\0';
       if (chunks.back().heading.length() == 0)
@@ -368,18 +304,15 @@ static void buildIndex() {
 
     lineCount++;
     if (lineCount % LINES_PER_CHUNK == 0) {
-      // New chunk starts right after this line
       ChunkInfo ci;
-      ci.offset = (size_t)f.position();
-      ci.heading = String(headBuf);  // carry forward last known heading
+      ci.offset  = (size_t)f.position();
+      ci.heading = String(headBuf);
       chunks.push_back(ci);
     }
   }
   f.close();
 
-  // Cache index to SD so subsequent opens skip this scan
-  if (!SD_MMC.exists(BMARK_DIR))
-    SD_MMC.mkdir(BMARK_DIR);
+  if (!SD_MMC.exists(BMARK_DIR)) SD_MMC.mkdir(BMARK_DIR);
   File idx = SD_MMC.open(IDX_PATH, FILE_WRITE);
   if (idx) {
     for (auto& ci : chunks) {
@@ -393,25 +326,22 @@ static void buildIndex() {
 }
 
 static bool loadIndex() {
-  if (!SD_MMC.exists(IDX_PATH))
-    return false;
+  if (!SD_MMC.exists(IDX_PATH)) return false;
   File f = SD_MMC.open(IDX_PATH, FILE_READ);
-  if (!f)
-    return false;
+  if (!f) return false;
 
   chunks.clear();
   while (f.available()) {
     String line = f.readStringUntil('\n');
     line.trim();
-    if (line.length() == 0)
-      continue;
+    if (line.length() == 0) continue;
     int tab = line.indexOf('\t');
     ChunkInfo ci;
     if (tab >= 0) {
-      ci.offset = (size_t)line.substring(0, tab).toInt();
+      ci.offset  = (size_t)line.substring(0, tab).toInt();
       ci.heading = line.substring(tab + 1);
     } else {
-      ci.offset = (size_t)line.toInt();
+      ci.offset  = (size_t)line.toInt();
       ci.heading = "";
     }
     chunks.push_back(ci);
@@ -421,39 +351,18 @@ static bool loadIndex() {
 }
 
 static void buildOrLoadIndex() {
-  if (!loadIndex())
-    buildIndex();
+  if (!loadIndex()) buildIndex();
   if (chunks.empty()) {
     ChunkInfo fallback;
-    fallback.offset = 0;
+    fallback.offset  = 0;
     fallback.heading = "Book";
     chunks.push_back(fallback);
   }
 }
 
 // ── Chunk loading ──────────────────────────────────────────────────────────────
-static void populateDocLines() {
-  indexCounter = 0;
-  for (auto& d : docLines) {
-    d.parseWords();
-    d.line = "";                              // free raw String — no longer needed
-    d.splitToLines();
-    std::vector<wordObject>().swap(d.words);  // free word list + capacity
-  }
-  if (docLines.empty()) {
-    DocLine blank;
-    blank.style = 'T';
-    blank.line = "(empty)";
-    docLines.push_back(blank);
-    docLines.back().parseWords();
-    docLines.back().line = "";
-    docLines.back().splitToLines();
-  }
-}
-
 static void loadChunk(int idx) {
-  if (idx < 0 || idx >= (int)chunks.size())
-    return;
+  if (idx < 0 || idx >= (int)chunks.size()) return;
 
   File f = SD_MMC.open(BOOK_PATH, FILE_READ);
   if (!f) {
@@ -464,111 +373,96 @@ static void loadChunk(int idx) {
   f.seek(chunks[idx].offset);
   size_t endOffset = (idx + 1 < (int)chunks.size()) ? chunks[idx + 1].offset : 0;
 
-  std::vector<DocLine>().swap(docLines);  // clear + release capacity
-  docLines.reserve(LINES_PER_CHUNK);     // pre-allocate; prevents reallocation churn
+  // Reset all layout pools for this chunk
+  s_textPoolUsed     = 0;
+  s_wordRefsUsed     = 0;
+  s_displayLinesUsed = 0;
+  s_sourceLinesUsed  = 0;
+  s_scrollCounter    = 0;
+
   ulong listCounter = 1;
-  int lineCount = 0;
+  int   lineCount   = 0;
 
   while (f.available()) {
-    if (endOffset != 0 && (size_t)f.position() >= endOffset)
-      break;
-    if (lineCount >= LINES_PER_CHUNK)
-      break;
-    if (ESP.getFreeHeap() < MIN_FREE_HEAP)
-      break;
+    if (endOffset != 0 && (size_t)f.position() >= endOffset) break;
+    if (lineCount >= LINES_PER_CHUNK) break;
 
     String raw = f.readStringUntil('\n');
     raw.trim();
 
-    char st = 'T';
-    String content = raw;
+    char   st = 'T';
+    String content;
 
-    if (raw.length() == 0)
+    if (raw.length() == 0) {
       st = 'B';
-    else if (raw == "---")
+    } else if (raw == "---") {
       st = 'H';
-    else if (raw.startsWith("# ")) {
-      st = '1';
-      content = raw.substring(2);
-      // Retroactively label chunk if the index scan missed it
-      if (chunks[idx].heading.length() == 0)
-        chunks[idx].heading = content;
+    } else if (raw.startsWith("# ")) {
+      st = '1'; content = raw.substring(2);
+      if (chunks[idx].heading.length() == 0) chunks[idx].heading = content;
     } else if (raw.startsWith("## ")) {
-      st = '2';
-      content = raw.substring(3);
+      st = '2'; content = raw.substring(3);
     } else if (raw.startsWith("### ")) {
-      st = '3';
-      content = raw.substring(4);
+      st = '3'; content = raw.substring(4);
     } else if (raw.startsWith("> ")) {
-      st = '>';
-      content = raw.substring(2);
+      st = '>'; content = raw.substring(2);
     } else if (raw.startsWith("- ")) {
-      st = '-';
-      content = raw.substring(2);
-      listCounter = 1;
+      st = '-'; content = raw.substring(2); listCounter = 1;
     } else if (raw.startsWith("```")) {
       st = 'C';
-      content = "";
     } else if (raw.length() >= 3 && isDigit(raw[0]) && raw[1] == '.' && raw[2] == ' ') {
-      st = 'L';
-      content = raw.substring(3);
+      st = 'L'; content = raw.substring(3);
+    } else {
+      content = std::move(raw);
     }
 
-    DocLine dl;
-    if (st == 'L')
-      dl.orderedListNumber = listCounter++;
-    else
-      listCounter = 1;
-    dl.style = st;
-    dl.line = content;
-    docLines.push_back(dl);
+    ulong listNum = (st == 'L') ? listCounter++ : 0;
+    if (st != 'L') listCounter = 1;
+
+    layoutSourceLine(content, st, listNum);
     lineCount++;
   }
   f.close();
 
-  populateDocLines();
+  if (s_sourceLinesUsed == 0)
+    layoutSourceLine(String("(empty)"), 'T', 0);
+
   needsRedraw = true;
 }
 
 // ── Bookmarks ─────────────────────────────────────────────────────────────────
 static void loadBookmark() {
-  if (!SD_MMC.exists(BMARK_PATH))
-    return;
+  if (!SD_MMC.exists(BMARK_PATH)) return;
   File f = SD_MMC.open(BMARK_PATH, FILE_READ);
-  if (!f)
-    return;
+  if (!f) return;
   String data = f.readStringUntil('\n');
   f.close();
 
   int sep = data.indexOf(':');
-  if (sep < 0)
-    return;
+  if (sep < 0) return;
 
-  int ck = data.substring(0, sep).toInt();
+  int   ck = data.substring(0, sep).toInt();
   ulong pg = (ulong)data.substring(sep + 1).toInt();
 
   if (ck >= 0 && ck < (int)chunks.size()) {
     currentChunk = ck;
-    pageIndex = pg;
+    pageIndex    = pg;
   }
 }
 
 static void saveBookmark() {
-  if (!SD_MMC.exists(BMARK_DIR))
-    SD_MMC.mkdir(BMARK_DIR);
+  if (!SD_MMC.exists(BMARK_DIR)) SD_MMC.mkdir(BMARK_DIR);
   File f = SD_MMC.open(BMARK_PATH, FILE_WRITE);
-  if (!f)
-    return;
+  if (!f) return;
   f.print(String(currentChunk) + ":" + String((unsigned long)pageIndex));
   f.close();
 }
 
 // ── OLED update ───────────────────────────────────────────────────────────────
 static void updateOLED() {
-  if (chunks.empty() || currentChunk >= (int)chunks.size())
-    return;
+  if (chunks.empty() || currentChunk >= (int)chunks.size()) return;
   int totalCk = (int)chunks.size();
-  int maxPg = getMaxPage();
+  int maxPg   = getMaxPage();
 
   float progress =
       (totalCk <= 1)
@@ -582,45 +476,130 @@ static void updateOLED() {
   u8g2.setDrawColor(1);
   u8g2.setFont(u8g2_font_5x7_tf);
 
-  // Chunk heading (fallback to "Chunk N" if no heading was found)
   String title = chunks[currentChunk].heading;
-  if (title.length() == 0)
-    title = "Chunk " + String(currentChunk + 1);
-  if ((int)title.length() > 36)
-    title = title.substring(0, 35) + "~";
+  if (title.length() == 0) title = "Chunk " + String(currentChunk + 1);
+  if ((int)title.length() > 36) title = title.substring(0, 35) + "~";
   u8g2.drawStr(1, 9, title.c_str());
 
-  // Page / chunk counters
-  String info = "Pg " + String((unsigned long)(pageIndex + 1)) + "/" + String(maxPg + 1) + "  Ck " +
-                String(currentChunk + 1) + "/" + String(totalCk);
+  String info = "Pg " + String((unsigned long)(pageIndex + 1)) + "/" + String(maxPg + 1) +
+                "  Ck " + String(currentChunk + 1) + "/" + String(totalCk);
   u8g2.drawStr(1, 20, info.c_str());
 
-  // Progress bar at bottom
   u8g2.drawFrame(0, 25, 256, 7);
-  if (barFill > 0)
-    u8g2.drawBox(1, 26, min(barFill, 254), 5);
+  if (barFill > 0) u8g2.drawBox(1, 26, min(barFill, 254), 5);
 
   u8g2.sendBuffer();
 }
 
 // ── Document rendering ────────────────────────────────────────────────────────
+static int renderSourceLine(int si, int startX, int startY) {
+  const SourceLine& src   = s_sourceLines[si];
+  char              style = src.style;
+
+  // Early-out: entire source line is before the scroll window
+  if (src.lineCount > 0 &&
+      s_displayLines[src.lineStart + src.lineCount - 1].scrollIdx < lineScroll)
+    return 0;
+
+  if (style == 'H') {
+    display.drawFastHLine(0, startY + 3, display.width(), GxEPD_BLACK);
+    display.drawFastHLine(0, startY + 4, display.width(), GxEPD_BLACK);
+    return 8;
+  }
+  if (style == 'B') return 12;
+
+  int drawX = startX;
+  if (style == '>')
+    drawX += SPECIAL_PADDING;
+  else if (style == '-' || style == 'L')
+    drawX += 2 * SPECIAL_PADDING;
+  else if (style == 'C')
+    drawX += SPECIAL_PADDING / 2;
+
+  int cursorY = startY;
+
+  for (int li = src.lineStart; li < src.lineStart + src.lineCount; li++) {
+    const DisplayLine& dl = s_displayLines[li];
+    if (dl.scrollIdx < lineScroll) continue;
+
+    int      cx      = drawX;
+    uint16_t max_hpx = 0;
+
+    // First pass: measure tallest glyph on this display line
+    for (int wi = dl.wordStart; wi < dl.wordStart + dl.wordCount; wi++) {
+      const WordRef& w = s_wordRefs[wi];
+      display.setFont(pickFont(style, w.bold, w.italic));
+      int16_t  x1, y1;
+      uint16_t wpx, hpx;
+      display.getTextBounds(w.text, cx, cursorY, &x1, &y1, &wpx, &hpx);
+      if (hpx > max_hpx) max_hpx = hpx;
+    }
+    if (style == '1' || style == '2' || style == '3') max_hpx += 4;
+
+    // Second pass: render
+    for (int wi = dl.wordStart; wi < dl.wordStart + dl.wordCount; wi++) {
+      const WordRef& w = s_wordRefs[wi];
+      display.setFont(pickFont(style, w.bold, w.italic));
+      int16_t  x1, y1;
+      uint16_t wpx, hpx, sw, sh;
+      display.getTextBounds(w.text, cx, cursorY, &x1, &y1, &wpx, &hpx);
+      display.getTextBounds(SPACEWIDTH_SYMBOL, cx, cursorY, &x1, &y1, &sw, &sh);
+      display.setCursor(cx, cursorY + max_hpx);
+      display.print(w.text);
+      cx += (int)wpx + (int)sw;
+    }
+
+    uint8_t pad = (style == '1' || style == '2' || style == '3') ? HEADING_LINE_PADDING
+                                                                  : NORMAL_LINE_PADDING;
+    cursorY += (int)max_hpx + (int)pad;
+  }
+
+  // Post-render decorations
+  if (style == '>') {
+    display.drawFastVLine(SPECIAL_PADDING / 2, startY, cursorY - startY, GxEPD_BLACK);
+    display.drawFastVLine(SPECIAL_PADDING / 2 + 1, startY, cursorY - startY, GxEPD_BLACK);
+  } else if (style == 'C') {
+    display.drawFastVLine(SPECIAL_PADDING / 4, startY, cursorY - startY, GxEPD_BLACK);
+    display.drawFastVLine(SPECIAL_PADDING / 4 + 1, startY, cursorY - startY, GxEPD_BLACK);
+    display.drawFastVLine(display.width() - SPECIAL_PADDING / 4, startY, cursorY - startY,
+                          GxEPD_BLACK);
+    display.drawFastVLine(display.width() - SPECIAL_PADDING / 4 - 1, startY, cursorY - startY,
+                          GxEPD_BLACK);
+  } else if (style == '1' || style == '2' || style == '3') {
+    display.drawFastHLine(0, cursorY - 2, display.width(), GxEPD_BLACK);
+    display.drawFastHLine(0, cursorY - 3, display.width(), GxEPD_BLACK);
+  } else if (style == '-') {
+    display.fillCircle(drawX - 8, startY + 8, 3, GxEPD_BLACK);
+  } else if (style == 'L') {
+    char num[16];
+    snprintf(num, sizeof(num), "%lu. ", src.orderedListNum);
+    display.setFont(pickFont('T', false, false));
+    int16_t  x1, y1;
+    uint16_t wpx, hpx;
+    display.getTextBounds(num, 0, 0, &x1, &y1, &wpx, &hpx);
+    display.setCursor(drawX - (int)wpx - 5, startY + (int)hpx);
+    display.print(num);
+  }
+
+  return cursorY - startY;
+}
+
 static void renderDocument(int startX, int startY) {
   lineScroll = pageIndex * LINES_PER_PAGE;
   int cursorY = startY;
-  for (auto& doc : docLines) {
-    if (cursorY >= display.height() - 6)
-      break;
-    cursorY += doc.displayLine(startX, cursorY);
+  for (int si = 0; si < s_sourceLinesUsed; si++) {
+    if (cursorY >= display.height() - 6) break;
+    cursorY += renderSourceLine(si, startX, cursorY);
   }
 }
 
 // ── Entry points ──────────────────────────────────────────────────────────────
 void APP_INIT() {
   initFonts();
-  fontStyle = serif;
-  fileError = false;
+  fontStyle    = serif;
+  fileError    = false;
   currentChunk = 0;
-  pageIndex = 0;
+  pageIndex    = 0;
 
   buildOrLoadIndex();
   if (!fileError) {
@@ -635,8 +614,7 @@ void APP_INIT() {
 
 void processKB_APP() {
   char ch = KB().updateKeypress();
-  if (!ch)
-    return;
+  if (!ch) return;
 
   // ESC or A: save bookmark and return to OS
   if (ch == 27 || ch == 65) {
@@ -702,8 +680,7 @@ void processKB_APP() {
 }
 
 void einkHandler_APP() {
-  if (!needsRedraw)
-    return;
+  if (!needsRedraw) return;
   needsRedraw = false;
 
   display.setFullWindow();
@@ -725,10 +702,8 @@ void einkHandler_APP() {
   // Header: chunk heading + separator rule
   display.setFont(&Font5x7Fixed);
   String header = chunks[currentChunk].heading;
-  if (header.length() == 0)
-    header = "Chunk " + String(currentChunk + 1);
-  if ((int)header.length() > 44)
-    header = header.substring(0, 43) + "~";
+  if (header.length() == 0) header = "Chunk " + String(currentChunk + 1);
+  if ((int)header.length() > 44) header = header.substring(0, 43) + "~";
   display.setCursor(4, 11);
   display.print(header);
   display.drawFastHLine(0, 14, display.width(), GxEPD_BLACK);
