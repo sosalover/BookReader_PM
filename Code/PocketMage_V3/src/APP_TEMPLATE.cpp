@@ -569,8 +569,7 @@ static void updateOLED() {
     if ((int)title.length() > 36) title = title.substring(0, 35) + "~";
     u8g2.drawStr(1, 9, title.c_str());
 
-    String info = "Pg " + String((unsigned long)(pageIndex + 1)) + "/" + String(maxPg + 1) +
-                  "  Ck " + String(currentChunk + 1) + "/" + String(totalCk);
+    String info = "Pg " + String((unsigned long)(pageIndex + 1)) + "/" + String(maxPg + 1);
     u8g2.drawStr(1, 20, info.c_str());
 
     u8g2.drawFrame(0, 25, 256, 7);
