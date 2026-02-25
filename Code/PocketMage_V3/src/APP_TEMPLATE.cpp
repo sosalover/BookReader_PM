@@ -7,6 +7,7 @@
 #include <SD_MMC.h>
 #include <globals.h>
 
+#include <Preferences.h>
 #include <vector>
 
 // ── Configuration ─────────────────────────────────────────────────────────────
@@ -82,6 +83,14 @@ static void writeCurrentBook(const char* fname) {
 
 static void clearCurrentBook() {
   SD_MMC.remove(CURRENT_PATH);
+}
+
+static void seamlessRestart() {
+  Preferences prefs;
+  prefs.begin("PocketMage", false);
+  prefs.putBool("Seamless_Reboot", true);
+  prefs.end();
+  ESP.restart();
 }
 
 // ── Font setup ────────────────────────────────────────────────────────────────
@@ -182,6 +191,12 @@ static int   currentChunk = 0;
 static ulong pageIndex    = 0;
 static bool  needsRedraw  = false;
 static bool  fileError    = false;
+
+// ── Touch scroll ──────────────────────────────────────────────────────────────
+static long int          s_scrollBase          = 0;
+static unsigned long     s_scrollCooldownUntil = 0;
+static const int         SWIPE_THRESHOLD       = 3;
+static const unsigned long SWIPE_COOLDOWN_MS   = 500;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 static int getMaxPage() {
@@ -711,13 +726,50 @@ void APP_INIT() {
   // Auto-select if only one book
   if (s_bookCount == 1) {
     writeCurrentBook(s_bookNames[0]);
-    ESP.restart();
+    seamlessRestart();
   }
 
   updateOLED();
 }
 
 void processKB_APP() {
+  // ── Touch scroll (reading mode only) ──────────────────────────────────────
+  if (appMode == MODE_READING) {
+    TOUCH().updateScrollFromTouch();
+    long int cur   = TOUCH().getDynamicScroll();
+    long int delta = cur - s_scrollBase;
+
+    if (millis() >= s_scrollCooldownUntil) {
+      if (delta >= SWIPE_THRESHOLD) {
+        s_scrollBase          = cur;
+        s_scrollCooldownUntil = millis() + SWIPE_COOLDOWN_MS;
+        if ((int)pageIndex < getMaxPage()) {
+          pageIndex++;
+          needsRedraw = true;
+        } else if (currentChunk + 1 < (int)chunks.size()) {
+          currentChunk++;
+          pageIndex = 0;
+          saveBookmark();
+          seamlessRestart();
+        }
+      } else if (delta <= -SWIPE_THRESHOLD) {
+        s_scrollBase          = cur;
+        s_scrollCooldownUntil = millis() + SWIPE_COOLDOWN_MS;
+        if (pageIndex > 0) {
+          pageIndex--;
+          needsRedraw = true;
+        } else if (currentChunk > 0) {
+          currentChunk--;
+          pageIndex = 65535;
+          saveBookmark();
+          seamlessRestart();
+        }
+      }
+    } else {
+      s_scrollBase = cur;  // drain accumulation during cooldown
+    }
+  }
+
   char ch = KB().updateKeypress();
   if (!ch) return;
 
@@ -743,7 +795,7 @@ void processKB_APP() {
     } else if (ch == 32 || ch == 13) {  // Space or Enter — open selected book
       if (s_bookCount > 0) {
         writeCurrentBook(s_bookNames[s_pickerSel]);
-        ESP.restart();
+        seamlessRestart();
       }
     }
     return;
@@ -759,7 +811,7 @@ void processKB_APP() {
   if (ch == 'b' || ch == 'B') {  // bookmark and return to picker
     saveBookmark();
     clearCurrentBook();
-    ESP.restart();
+    seamlessRestart();
     return;
   }
 
@@ -780,7 +832,7 @@ void processKB_APP() {
       currentChunk++;
       pageIndex = 0;
       saveBookmark();
-      ESP.restart();
+      seamlessRestart();
     }
 
   } else if (ch == 19) {  // LEFT — prev page
@@ -791,7 +843,7 @@ void processKB_APP() {
       currentChunk--;
       pageIndex = 65535;  // sentinel: APP_INIT clamps to getMaxPage()
       saveBookmark();
-      ESP.restart();
+      seamlessRestart();
     }
 
   } else if (ch == 6) {  // RIGHT (FN) — next chunk
@@ -799,7 +851,7 @@ void processKB_APP() {
       currentChunk++;
       pageIndex = 0;
       saveBookmark();
-      ESP.restart();
+      seamlessRestart();
     }
     KB().setKeyboardState(NORMAL);
 
@@ -808,7 +860,7 @@ void processKB_APP() {
       currentChunk--;
       pageIndex = 65535;
       saveBookmark();
-      ESP.restart();
+      seamlessRestart();
     }
     KB().setKeyboardState(NORMAL);
 
