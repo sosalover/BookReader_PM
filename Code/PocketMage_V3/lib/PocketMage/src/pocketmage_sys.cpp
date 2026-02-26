@@ -220,6 +220,12 @@ namespace pocketmage {
 
 void PocketMage_INIT(){
   pocketmage::checkRebootOTA();
+
+  // Read and clear seamless-restart flag (set by book reader on chunk nav restarts)
+  prefs.begin("PocketMage", false);
+  bool seamless = prefs.getBool("Seamless_Reboot", false);
+  if (seamless) prefs.putBool("Seamless_Reboot", false);
+  prefs.end();
   // Serial, I2C, SPI
   Serial.begin(115200);
   Wire.begin(I2C_SDA, I2C_SCL);
@@ -278,8 +284,8 @@ void PocketMage_INIT(){
   ESP_LOGD(TAG,"loaded state"); 
   
   // STARTUP JINGLE
-  setupBZ();
-  ESP_LOGD(TAG,"setup buzzer"); 
+  setupBZ(!seamless);
+  ESP_LOGD(TAG,"setup buzzer");
 }
 
 // ===================== GLOBAL TEXT HELPERS =====================

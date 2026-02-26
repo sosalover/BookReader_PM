@@ -51,12 +51,12 @@ void PocketmageBZ::end() {
 }
 
 // Setup for Buzzer Class
-void setupBZ() {
+void setupBZ(bool playStartup) {
   //ledc_timer_config(&ledc_timer);
   //ledc_channel_config(&ledc_channel);
   auto& bz = BZ();
   bz.begin();
-  bz.playJingle(Jingles::Startup);
+  if (playStartup) bz.playJingle(Jingles::Startup);
 }
 
 // Access for other apps

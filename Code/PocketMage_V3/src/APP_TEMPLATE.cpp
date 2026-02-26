@@ -20,6 +20,7 @@
 #define LINES_PER_PAGE       12
 #define CONTENT_START_Y      20
 #define LINES_PER_CHUNK      100   // source lines per chunk
+#define MAX_CHUNKS           256   // stack array cap in buildIndex()
 
 #define MAX_WORD_LEN         63    // max chars per word stored in text pool
 #define TEXT_POOL_CAP        10240 // word text bytes for one chunk (~10 KB)
@@ -27,7 +28,7 @@
 #define DISPLAY_LINE_CAP     600   // total display lines for one chunk
 
 // ── App mode ──────────────────────────────────────────────────────────────────
-enum AppMode { MODE_PICKER, MODE_READING };
+enum AppMode { MODE_PICKER, MODE_READING, MODE_PAGE_JUMP };
 static AppMode appMode = MODE_PICKER;
 
 // ── Book picker ───────────────────────────────────────────────────────────────
@@ -45,13 +46,14 @@ static const char* const BOOKS_DIR    = "/books";
 static const char* const BMARKS_DIR   = "/books/.bmarks";
 static const char* const CURRENT_PATH = "/books/.current";
 
-static char s_bookPath [96];
-static char s_bmarkPath[96];
-static char s_idxPath  [96];
+static char s_bookPath       [96];
+static char s_bmarkPath      [96];
+static char s_idxPath        [96];
+static char s_bookDisplayName[MAX_BOOK_NAME];
 
 static void setPaths(const char* fname) {
   snprintf(s_bookPath, sizeof(s_bookPath), "/books/%s", fname);
-  // Strip .md from base name for bmark/idx files
+  // Strip .md from base name for bmark/idx files and display name
   char base[MAX_BOOK_NAME];
   strncpy(base, fname, sizeof(base) - 1);
   base[sizeof(base) - 1] = '\0';
@@ -60,6 +62,8 @@ static void setPaths(const char* fname) {
     base[len - 3] = '\0';
   snprintf(s_bmarkPath, sizeof(s_bmarkPath), "/books/.bmarks/%s.bmark", base);
   snprintf(s_idxPath,   sizeof(s_idxPath),   "/books/.bmarks/%s.idx",   base);
+  strncpy(s_bookDisplayName, base, sizeof(s_bookDisplayName) - 1);
+  s_bookDisplayName[sizeof(s_bookDisplayName) - 1] = '\0';
 }
 
 // Current-book persistence helpers
@@ -94,9 +98,6 @@ static void seamlessRestart() {
 }
 
 // ── Font setup ────────────────────────────────────────────────────────────────
-enum FontFamily { serif = 0, sans = 1, mono = 2 };
-static uint8_t fontStyle = serif;
-
 struct FontMap {
   const GFXfont* normal;
   const GFXfont* normal_B;
@@ -113,26 +114,26 @@ struct FontMap {
   const GFXfont* list;
 };
 
-static FontMap fonts[3];
+static FontMap s_fonts;
 
 static void initFonts() {
-  fonts[serif].normal    = &FreeSerif9pt7b;
-  fonts[serif].normal_B  = &FreeSerifBold9pt7b;
-  fonts[serif].normal_I  = &FreeSerif9pt7b;  // italic fallback
-  fonts[serif].normal_BI = &FreeSerifBold9pt7b;
-  fonts[serif].h1        = &FreeSerif12pt7b;
-  fonts[serif].h1_B      = &FreeSerif12pt7b;
-  fonts[serif].h2        = &FreeSerifBold9pt7b;
-  fonts[serif].h2_B      = &FreeSerifBold9pt7b;
-  fonts[serif].h3        = &FreeSerif9pt7b;
-  fonts[serif].h3_B      = &FreeSerifBold9pt7b;
-  fonts[serif].code      = &FreeMonoBold9pt7b;
-  fonts[serif].quote     = &FreeSerif9pt7b;
-  fonts[serif].list      = &FreeSerif9pt7b;
+  s_fonts.normal    = &FreeSerif9pt7b;
+  s_fonts.normal_B  = &FreeSerifBold9pt7b;
+  s_fonts.normal_I  = &FreeSerif9pt7b;  // italic fallback — no italic variant included
+  s_fonts.normal_BI = &FreeSerifBold9pt7b;
+  s_fonts.h1        = &FreeSerif12pt7b;
+  s_fonts.h1_B      = &FreeSerif12pt7b;
+  s_fonts.h2        = &FreeSerifBold9pt7b;
+  s_fonts.h2_B      = &FreeSerifBold9pt7b;
+  s_fonts.h3        = &FreeSerif9pt7b;
+  s_fonts.h3_B      = &FreeSerifBold9pt7b;
+  s_fonts.code      = &FreeMonoBold9pt7b;
+  s_fonts.quote     = &FreeSerif9pt7b;
+  s_fonts.list      = &FreeSerif9pt7b;
 }
 
 static const GFXfont* pickFont(char style, bool bold, bool italic) {
-  FontMap& fm = fonts[fontStyle];
+  FontMap& fm = s_fonts;
   switch (style) {
     case '1': return bold ? fm.h1_B : fm.h1;
     case '2': return bold ? fm.h2_B : fm.h2;
@@ -157,7 +158,7 @@ struct WordRef {
 };
 
 struct DisplayLine {
-  ulong    scrollIdx;
+  ulong    lineIdx;
   uint16_t wordStart;
   uint8_t  wordCount;
 };
@@ -177,8 +178,8 @@ static DisplayLine s_displayLines[DISPLAY_LINE_CAP];
 static int         s_displayLinesUsed = 0;
 static SourceLine  s_sourceLines[LINES_PER_CHUNK];
 static int         s_sourceLinesUsed  = 0;
-static ulong       s_scrollCounter    = 0;
-static ulong       lineScroll         = 0;
+static ulong       s_lineIndex        = 0;
+static ulong       s_pageStartLine    = 0;
 
 // ── Chunk index ────────────────────────────────────────────────────────────────
 struct ChunkInfo {
@@ -187,10 +188,17 @@ struct ChunkInfo {
 };
 
 static std::vector<ChunkInfo> chunks;
-static int   currentChunk = 0;
-static ulong pageIndex    = 0;
-static bool  needsRedraw  = false;
-static bool  fileError    = false;
+static int   currentChunk     = 0;
+static ulong pageIndex        = 0;
+static bool  needsRedraw      = false;
+static bool  fileError        = false;
+static int s_pageCounts[MAX_CHUNKS] = {};  // page count per chunk, BSS
+static int s_numPageCounts          = 0;   // how many entries are valid
+static int s_totalPages             = 0;   // sum of all s_pageCounts
+
+// ── Page jump ─────────────────────────────────────────────────────────────────
+static char s_jumpBuf[5] = "";
+static int  s_jumpLen    = 0;
 
 // ── Touch scroll ──────────────────────────────────────────────────────────────
 static long int          s_scrollBase          = 0;
@@ -201,6 +209,17 @@ static const unsigned long SWIPE_COOLDOWN_MS   = 500;
 // ── Helpers ───────────────────────────────────────────────────────────────────
 static int getMaxPage() {
   return (s_displayLinesUsed <= 0) ? 0 : (s_displayLinesUsed - 1) / LINES_PER_PAGE;
+}
+
+// Returns 1-based global page and total, or -1/-1 if page counts are unknown.
+// Sums on the fly so currentChunk is always read at call time (after loadBookmark).
+static void getGlobalPageInfo(int& outPage, int& outTotal) {
+  if (s_totalPages <= 0 || s_numPageCounts == 0) { outPage = -1; outTotal = -1; return; }
+  int offset = 0;
+  for (int i = 0; i < currentChunk && i < s_numPageCounts; i++)
+    offset += s_pageCounts[i];
+  outPage  = offset + (int)pageIndex + 1;
+  outTotal = s_totalPages;
 }
 
 // ── Layout ────────────────────────────────────────────────────────────────────
@@ -218,7 +237,7 @@ static const char* internWord(const char* src, int len) {
 static void commitDisplayLine(int wordStart, int wordCount, SourceLine& src) {
   if (s_displayLinesUsed >= DISPLAY_LINE_CAP) return;
   DisplayLine& dl = s_displayLines[s_displayLinesUsed++];
-  dl.scrollIdx = s_scrollCounter++;
+  dl.lineIdx   = s_lineIndex++;
   dl.wordStart = (uint16_t)wordStart;
   dl.wordCount = (uint8_t)(wordCount > 255 ? 255 : wordCount);
   src.lineCount++;
@@ -326,6 +345,8 @@ static void layoutSourceLine(const String& text, char style, ulong orderedListNu
 }
 
 // ── Index building ─────────────────────────────────────────────────────────────
+static void loadChunk(int idx, bool triggerRedraw);  // forward declaration
+
 static void buildIndex() {
   u8g2.clearBuffer();
   u8g2.setFont(u8g2_font_5x7_tf);
@@ -377,13 +398,36 @@ static void buildIndex() {
   }
   f.close();
 
+  // Count pages per chunk into a short-lived stack array (512 bytes, BSS-free)
+  u8g2.clearBuffer();
+  u8g2.setFont(u8g2_font_5x7_tf);
+  u8g2.drawStr(1, 9, "Counting pages...");
+  u8g2.sendBuffer();
+  int nChunks = (int)chunks.size();
+  if (nChunks > MAX_CHUNKS) nChunks = MAX_CHUNKS;
+  int pageCounts[MAX_CHUNKS] = {};
+  for (int i = 0; i < nChunks; i++) {
+    loadChunk(i, false);
+    pageCounts[i] = getMaxPage() + 1;
+  }
+  needsRedraw = false;
+
+  // Populate s_pageCounts and persist to .idx
+  s_numPageCounts = nChunks;
+  s_totalPages    = 0;
+  for (int i = 0; i < nChunks; i++) {
+    s_pageCounts[i] = pageCounts[i];
+    s_totalPages   += pageCounts[i];
+  }
   if (!SD_MMC.exists(BMARKS_DIR)) SD_MMC.mkdir(BMARKS_DIR);
   File idx = SD_MMC.open(s_idxPath, FILE_WRITE);
   if (idx) {
-    for (auto& ci : chunks) {
-      idx.print(String((unsigned long)ci.offset));
+    for (int i = 0; i < nChunks; i++) {
+      idx.print(String((unsigned long)chunks[i].offset));
       idx.print('\t');
-      idx.print(ci.heading);
+      idx.print(chunks[i].heading);
+      idx.print('\t');
+      idx.print(pageCounts[i]);
       idx.print('\n');
     }
     idx.close();
@@ -396,22 +440,43 @@ static bool loadIndex() {
   if (!f) return false;
 
   chunks.clear();
+  s_numPageCounts   = 0;
+  s_totalPages      = 0;
+  bool allHavePageCount = true;
   while (f.available()) {
     String line = f.readStringUntil('\n');
     line.trim();
     if (line.length() == 0) continue;
     int tab = line.indexOf('\t');
     ChunkInfo ci;
+    int pageCount = 0;
     if (tab >= 0) {
-      ci.offset  = (size_t)line.substring(0, tab).toInt();
-      ci.heading = line.substring(tab + 1);
+      ci.offset   = (size_t)line.substring(0, tab).toInt();
+      int tab2    = line.indexOf('\t', tab + 1);
+      if (tab2 >= 0) {
+        ci.heading = line.substring(tab + 1, tab2);
+        pageCount  = line.substring(tab2 + 1).toInt();
+      } else {
+        ci.heading = line.substring(tab + 1);
+      }
     } else {
       ci.offset  = (size_t)line.toInt();
       ci.heading = "";
     }
+    if (pageCount <= 0) allHavePageCount = false;
+    if (s_numPageCounts < MAX_CHUNKS) s_pageCounts[s_numPageCounts] = pageCount;
+    s_numPageCounts++;
+    s_totalPages += pageCount;
     chunks.push_back(ci);
   }
   f.close();
+  // If any chunk is missing page counts, force a rebuild
+  if (!allHavePageCount) {
+    chunks.clear();
+    s_numPageCounts = 0;
+    s_totalPages    = 0;
+    return false;
+  }
   return !chunks.empty();
 }
 
@@ -420,13 +485,13 @@ static void buildOrLoadIndex() {
   if (chunks.empty()) {
     ChunkInfo fallback;
     fallback.offset  = 0;
-    fallback.heading = "Book";
+    fallback.heading = "";
     chunks.push_back(fallback);
   }
 }
 
 // ── Chunk loading ──────────────────────────────────────────────────────────────
-static void loadChunk(int idx) {
+static void loadChunk(int idx, bool triggerRedraw) {
   if (idx < 0 || idx >= (int)chunks.size()) return;
 
   File f = SD_MMC.open(s_bookPath, FILE_READ);
@@ -442,7 +507,7 @@ static void loadChunk(int idx) {
   s_wordRefsUsed     = 0;
   s_displayLinesUsed = 0;
   s_sourceLinesUsed  = 0;
-  s_scrollCounter    = 0;
+  s_lineIndex        = 0;
 
   ulong listCounter = 1;
   int   lineCount   = 0;
@@ -491,7 +556,7 @@ static void loadChunk(int idx) {
   if (s_sourceLinesUsed == 0)
     layoutSourceLine(String("(empty)"), 'T', 0);
 
-  needsRedraw = true;
+  if (triggerRedraw) needsRedraw = true;
 }
 
 // ── Bookmarks ─────────────────────────────────────────────────────────────────
@@ -557,29 +622,45 @@ static void updateOLED() {
     char hint[48];
     snprintf(hint, sizeof(hint), "< > select  SPC open  (%d books)", s_bookCount);
     u8g2.drawStr(1, 20, hint);
+  } else if (appMode == MODE_PAGE_JUMP) {
+    char prompt[32];
+    int maxPg = (s_totalPages > 0) ? s_totalPages : (getMaxPage() + 1);
+    snprintf(prompt, sizeof(prompt), "Go to page (1-%d):", maxPg);
+    u8g2.drawStr(1, 9, prompt);
+    u8g2.drawStr(1, 20, s_jumpBuf);
   } else {
     if (chunks.empty() || currentChunk >= (int)chunks.size()) {
       u8g2.sendBuffer();
       return;
     }
-    int totalCk = (int)chunks.size();
-    int maxPg   = getMaxPage();
+    int globalPage, totalPages;
+    getGlobalPageInfo(globalPage, totalPages);
 
-    float progress =
-        (totalCk <= 1)
-            ? (maxPg > 0 ? (float)pageIndex / (float)maxPg : 1.0f)
-            : ((float)currentChunk + (maxPg > 0 ? (float)pageIndex / (float)maxPg : 1.0f)) /
-                  (float)totalCk;
+    float progress;
+    if (globalPage > 0 && totalPages > 0) {
+      progress = (float)(globalPage - 1) / (float)totalPages;
+    } else {
+      int totalCk = (int)chunks.size();
+      int maxPg   = getMaxPage();
+      progress = (totalCk <= 1)
+          ? (maxPg > 0 ? (float)pageIndex / (float)maxPg : 1.0f)
+          : ((float)currentChunk + (maxPg > 0 ? (float)pageIndex / (float)maxPg : 1.0f)) /
+                (float)totalCk;
+    }
     progress = constrain(progress, 0.0f, 1.0f);
     int barFill = (int)(253.0f * progress);
 
     String title = chunks[currentChunk].heading;
-    if (title.length() == 0) title = "Chunk " + String(currentChunk + 1);
+    if (title.length() == 0) title = String(s_bookDisplayName);
     if ((int)title.length() > 36) title = title.substring(0, 35) + "~";
     u8g2.drawStr(1, 9, title.c_str());
 
-    String info = "Pg " + String((unsigned long)(pageIndex + 1)) + "/" + String(maxPg + 1) +
-                  "  Ck " + String(currentChunk + 1) + "/" + String(totalCk);
+    String info;
+    if (globalPage > 0 && totalPages > 0) {
+      info = "Pg " + String(globalPage) + "/" + String(totalPages);
+    } else {
+      info = "Pg " + String((unsigned long)(pageIndex + 1)) + "/" + String(getMaxPage() + 1);
+    }
     u8g2.drawStr(1, 20, info.c_str());
 
     u8g2.drawFrame(0, 25, 256, 7);
@@ -595,7 +676,7 @@ static int renderSourceLine(int si, int startX, int startY) {
   char              style = src.style;
 
   if (src.lineCount > 0 &&
-      s_displayLines[src.lineStart + src.lineCount - 1].scrollIdx < lineScroll)
+      s_displayLines[src.lineStart + src.lineCount - 1].lineIdx < s_pageStartLine)
     return 0;
 
   if (style == 'H') {
@@ -617,7 +698,7 @@ static int renderSourceLine(int si, int startX, int startY) {
 
   for (int li = src.lineStart; li < src.lineStart + src.lineCount; li++) {
     const DisplayLine& dl = s_displayLines[li];
-    if (dl.scrollIdx < lineScroll) continue;
+    if (dl.lineIdx < s_pageStartLine) continue;
 
     int      cx      = drawX;
     uint16_t max_hpx = 0;
@@ -679,7 +760,7 @@ static int renderSourceLine(int si, int startX, int startY) {
 }
 
 static void renderDocument(int startX, int startY) {
-  lineScroll = pageIndex * LINES_PER_PAGE;
+  s_pageStartLine = pageIndex * LINES_PER_PAGE;
   int cursorY = startY;
   for (int si = 0; si < s_sourceLinesUsed; si++) {
     if (cursorY >= display.height() - 6) break;
@@ -690,7 +771,6 @@ static void renderDocument(int startX, int startY) {
 // ── Entry points ──────────────────────────────────────────────────────────────
 void APP_INIT() {
   initFonts();
-  fontStyle    = serif;
   fileError    = false;
   currentChunk = 0;
   pageIndex    = 0;
@@ -707,7 +787,7 @@ void APP_INIT() {
       buildOrLoadIndex();
       if (!fileError) {
         loadBookmark();
-        loadChunk(currentChunk);
+        loadChunk(currentChunk, true);
         int mp = getMaxPage();
         if ((int)pageIndex > mp) pageIndex = (ulong)mp;
       }
@@ -801,6 +881,66 @@ void processKB_APP() {
     return;
   }
 
+  // ── Page jump mode ──────────────────────────────────────────────────────────
+  if (appMode == MODE_PAGE_JUMP) {
+    if (ch == 18) {  // FN — needed to reach number layer
+      KB().setKeyboardState(KB().getKeyboardState() == FUNC ? NORMAL : FUNC);
+      return;
+    }
+    if (ch >= '0' && ch <= '9') {
+      if (s_jumpLen < 4) {
+        s_jumpBuf[s_jumpLen++] = ch;
+        s_jumpBuf[s_jumpLen]   = '\0';
+        updateOLED();
+      }
+    } else if (ch == 13 || ch == 32) {  // Enter or Space — commit
+      if (s_jumpLen > 0) {
+        int target = atoi(s_jumpBuf);
+        if (s_totalPages > 0 && s_numPageCounts > 0) {
+          // Global page navigation across chunks
+          if (target < 1)           target = 1;
+          if (target > s_totalPages) target = s_totalPages;
+          int offset      = 0;
+          int targetChunk = s_numPageCounts - 1;
+          int localPage   = s_pageCounts[targetChunk] - 1;
+          for (int i = 0; i < s_numPageCounts; i++) {
+            if (offset + s_pageCounts[i] >= target) {
+              targetChunk = i;
+              localPage   = target - offset - 1;
+              break;
+            }
+            offset += s_pageCounts[i];
+          }
+          if (targetChunk != currentChunk) {
+            currentChunk = targetChunk;
+            pageIndex    = (ulong)localPage;
+            appMode      = MODE_READING;
+            saveBookmark();
+            seamlessRestart();
+            return;
+          }
+          pageIndex   = (ulong)localPage;
+          needsRedraw = true;
+        } else {
+          // Fallback: local chunk pages only
+          int maxPg = getMaxPage();
+          if (target < 1)         target = 1;
+          if (target > maxPg + 1) target = maxPg + 1;
+          pageIndex   = (ulong)(target - 1);
+          needsRedraw = true;
+        }
+      }
+      KB().setKeyboardState(NORMAL);
+      appMode = MODE_READING;
+      updateOLED();
+    } else if (ch == 27 || ch == 8) {  // ESC or Backspace — cancel
+      KB().setKeyboardState(NORMAL);
+      appMode = MODE_READING;
+      updateOLED();
+    }
+    return;
+  }
+
   // ── Reading mode ────────────────────────────────────────────────────────────
   if (ch == 27 || ch == 65) {  // ESC or A — save & return to OS (keeps .current)
     saveBookmark();
@@ -812,6 +952,14 @@ void processKB_APP() {
     saveBookmark();
     clearCurrentBook();
     seamlessRestart();
+    return;
+  }
+
+  if (ch == 'g' || ch == 'G') {  // jump to page
+    s_jumpLen    = 0;
+    s_jumpBuf[0] = '\0';
+    appMode      = MODE_PAGE_JUMP;
+    updateOLED();
     return;
   }
 
@@ -936,7 +1084,7 @@ void einkHandler_APP() {
 
   display.setFont(&Font5x7Fixed);
   String header = chunks[currentChunk].heading;
-  if (header.length() == 0) header = "Chunk " + String(currentChunk + 1);
+  if (header.length() == 0) header = String(s_bookDisplayName);
   if ((int)header.length() > 44) header = header.substring(0, 43) + "~";
   display.setCursor(4, 11);
   display.print(header);
