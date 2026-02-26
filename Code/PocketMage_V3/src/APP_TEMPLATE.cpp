@@ -85,9 +85,6 @@ static void clearCurrentBook() {
 }
 
 // ── Font setup ────────────────────────────────────────────────────────────────
-enum FontFamily { serif = 0, sans = 1, mono = 2 };
-static uint8_t fontStyle = serif;
-
 struct FontMap {
   const GFXfont* normal;
   const GFXfont* normal_B;
@@ -104,26 +101,26 @@ struct FontMap {
   const GFXfont* list;
 };
 
-static FontMap fonts[3];
+static FontMap s_fonts;
 
 static void initFonts() {
-  fonts[serif].normal    = &FreeSerif9pt7b;
-  fonts[serif].normal_B  = &FreeSerifBold9pt7b;
-  fonts[serif].normal_I  = &FreeSerif9pt7b;  // italic fallback
-  fonts[serif].normal_BI = &FreeSerifBold9pt7b;
-  fonts[serif].h1        = &FreeSerif12pt7b;
-  fonts[serif].h1_B      = &FreeSerif12pt7b;
-  fonts[serif].h2        = &FreeSerifBold9pt7b;
-  fonts[serif].h2_B      = &FreeSerifBold9pt7b;
-  fonts[serif].h3        = &FreeSerif9pt7b;
-  fonts[serif].h3_B      = &FreeSerifBold9pt7b;
-  fonts[serif].code      = &FreeMonoBold9pt7b;
-  fonts[serif].quote     = &FreeSerif9pt7b;
-  fonts[serif].list      = &FreeSerif9pt7b;
+  s_fonts.normal    = &FreeSerif9pt7b;
+  s_fonts.normal_B  = &FreeSerifBold9pt7b;
+  s_fonts.normal_I  = &FreeSerif9pt7b;  // italic fallback — no italic variant included
+  s_fonts.normal_BI = &FreeSerifBold9pt7b;
+  s_fonts.h1        = &FreeSerif12pt7b;
+  s_fonts.h1_B      = &FreeSerif12pt7b;
+  s_fonts.h2        = &FreeSerifBold9pt7b;
+  s_fonts.h2_B      = &FreeSerifBold9pt7b;
+  s_fonts.h3        = &FreeSerif9pt7b;
+  s_fonts.h3_B      = &FreeSerifBold9pt7b;
+  s_fonts.code      = &FreeMonoBold9pt7b;
+  s_fonts.quote     = &FreeSerif9pt7b;
+  s_fonts.list      = &FreeSerif9pt7b;
 }
 
 static const GFXfont* pickFont(char style, bool bold, bool italic) {
-  FontMap& fm = fonts[fontStyle];
+  FontMap& fm = s_fonts;
   switch (style) {
     case '1': return bold ? fm.h1_B : fm.h1;
     case '2': return bold ? fm.h2_B : fm.h2;
@@ -148,7 +145,7 @@ struct WordRef {
 };
 
 struct DisplayLine {
-  ulong    scrollIdx;
+  ulong    lineIdx;
   uint16_t wordStart;
   uint8_t  wordCount;
 };
@@ -168,8 +165,8 @@ static DisplayLine s_displayLines[DISPLAY_LINE_CAP];
 static int         s_displayLinesUsed = 0;
 static SourceLine  s_sourceLines[LINES_PER_CHUNK];
 static int         s_sourceLinesUsed  = 0;
-static ulong       s_scrollCounter    = 0;
-static ulong       lineScroll         = 0;
+static ulong       s_lineIndex        = 0;
+static ulong       s_pageStartLine    = 0;
 
 // ── Chunk index ────────────────────────────────────────────────────────────────
 struct ChunkInfo {
@@ -203,7 +200,7 @@ static const char* internWord(const char* src, int len) {
 static void commitDisplayLine(int wordStart, int wordCount, SourceLine& src) {
   if (s_displayLinesUsed >= DISPLAY_LINE_CAP) return;
   DisplayLine& dl = s_displayLines[s_displayLinesUsed++];
-  dl.scrollIdx = s_scrollCounter++;
+  dl.lineIdx   = s_lineIndex++;
   dl.wordStart = (uint16_t)wordStart;
   dl.wordCount = (uint8_t)(wordCount > 255 ? 255 : wordCount);
   src.lineCount++;
@@ -427,7 +424,7 @@ static void loadChunk(int idx) {
   s_wordRefsUsed     = 0;
   s_displayLinesUsed = 0;
   s_sourceLinesUsed  = 0;
-  s_scrollCounter    = 0;
+  s_lineIndex        = 0;
 
   ulong listCounter = 1;
   int   lineCount   = 0;
@@ -580,7 +577,7 @@ static int renderSourceLine(int si, int startX, int startY) {
   char              style = src.style;
 
   if (src.lineCount > 0 &&
-      s_displayLines[src.lineStart + src.lineCount - 1].scrollIdx < lineScroll)
+      s_displayLines[src.lineStart + src.lineCount - 1].lineIdx < s_pageStartLine)
     return 0;
 
   if (style == 'H') {
@@ -602,7 +599,7 @@ static int renderSourceLine(int si, int startX, int startY) {
 
   for (int li = src.lineStart; li < src.lineStart + src.lineCount; li++) {
     const DisplayLine& dl = s_displayLines[li];
-    if (dl.scrollIdx < lineScroll) continue;
+    if (dl.lineIdx < s_pageStartLine) continue;
 
     int      cx      = drawX;
     uint16_t max_hpx = 0;
@@ -664,7 +661,7 @@ static int renderSourceLine(int si, int startX, int startY) {
 }
 
 static void renderDocument(int startX, int startY) {
-  lineScroll = pageIndex * LINES_PER_PAGE;
+  s_pageStartLine = pageIndex * LINES_PER_PAGE;
   int cursorY = startY;
   for (int si = 0; si < s_sourceLinesUsed; si++) {
     if (cursorY >= display.height() - 6) break;
@@ -675,7 +672,6 @@ static void renderDocument(int startX, int startY) {
 // ── Entry points ──────────────────────────────────────────────────────────────
 void APP_INIT() {
   initFonts();
-  fontStyle    = serif;
   fileError    = false;
   currentChunk = 0;
   pageIndex    = 0;
