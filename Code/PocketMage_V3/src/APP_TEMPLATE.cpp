@@ -7,6 +7,7 @@
 #include <SD_MMC.h>
 #include <globals.h>
 
+#include <Preferences.h>
 #include <vector>
 
 // ── Configuration ─────────────────────────────────────────────────────────────
@@ -82,6 +83,14 @@ static void writeCurrentBook(const char* fname) {
 
 static void clearCurrentBook() {
   SD_MMC.remove(CURRENT_PATH);
+}
+
+static void seamlessRestart() {
+  Preferences prefs;
+  prefs.begin("PocketMage", false);
+  prefs.putBool("Seamless_Reboot", true);
+  prefs.end();
+  ESP.restart();
 }
 
 // ── Font setup ────────────────────────────────────────────────────────────────
@@ -707,7 +716,7 @@ void APP_INIT() {
   // Auto-select if only one book
   if (s_bookCount == 1) {
     writeCurrentBook(s_bookNames[0]);
-    ESP.restart();
+    seamlessRestart();
   }
 
   updateOLED();
@@ -739,7 +748,7 @@ void processKB_APP() {
     } else if (ch == 32 || ch == 13) {  // Space or Enter — open selected book
       if (s_bookCount > 0) {
         writeCurrentBook(s_bookNames[s_pickerSel]);
-        ESP.restart();
+        seamlessRestart();
       }
     }
     return;
@@ -755,7 +764,7 @@ void processKB_APP() {
   if (ch == 'b' || ch == 'B') {  // bookmark and return to picker
     saveBookmark();
     clearCurrentBook();
-    ESP.restart();
+    seamlessRestart();
     return;
   }
 
@@ -776,7 +785,7 @@ void processKB_APP() {
       currentChunk++;
       pageIndex = 0;
       saveBookmark();
-      ESP.restart();
+      seamlessRestart();
     }
 
   } else if (ch == 19) {  // LEFT — prev page
@@ -787,7 +796,7 @@ void processKB_APP() {
       currentChunk--;
       pageIndex = 65535;  // sentinel: APP_INIT clamps to getMaxPage()
       saveBookmark();
-      ESP.restart();
+      seamlessRestart();
     }
 
   } else if (ch == 6) {  // RIGHT (FN) — next chunk
@@ -795,7 +804,7 @@ void processKB_APP() {
       currentChunk++;
       pageIndex = 0;
       saveBookmark();
-      ESP.restart();
+      seamlessRestart();
     }
     KB().setKeyboardState(NORMAL);
 
@@ -804,7 +813,7 @@ void processKB_APP() {
       currentChunk--;
       pageIndex = 65535;
       saveBookmark();
-      ESP.restart();
+      seamlessRestart();
     }
     KB().setKeyboardState(NORMAL);
 
