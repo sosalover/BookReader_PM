@@ -55,6 +55,30 @@ void PocketmageTOUCH::updateScrollFromTouch() {
   }
 }
 
+void PocketmageTOUCH::updateScrollRaw() {
+  uint16_t touched = cap_.touched();
+  int newTouch = -1;
+
+  for (int i = 0; i < 9; ++i)
+    if (touched & (1 << i)) { newTouch = i; break; }
+
+  unsigned long now = millis();
+
+  if (newTouch != -1) {
+    if (lastTouch_ != -1) {
+      int d = abs(newTouch - lastTouch_);
+      if (d <= 2) {
+        if (newTouch > lastTouch_) dynamicScroll_++;
+        else if (newTouch < lastTouch_) dynamicScroll_--;
+      }
+    }
+    lastTouch_     = newTouch;
+    lastTouchTime_ = now;
+  } else if (lastTouch_ != -1 && (now - lastTouchTime_ > TOUCH_TIMEOUT_MS)) {
+    lastTouch_ = -1;
+  }
+}
+
 bool PocketmageTOUCH::updateScroll(int maxScroll,ulong& lineScroll) {
 
   static int lastTouchPos = -1;

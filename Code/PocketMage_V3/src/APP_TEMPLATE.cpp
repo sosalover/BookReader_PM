@@ -815,7 +815,7 @@ void APP_INIT() {
 void processKB_APP() {
   // ── Touch scroll (reading mode only) ──────────────────────────────────────
   if (appMode == MODE_READING) {
-    TOUCH().updateScrollFromTouch();
+    TOUCH().updateScrollRaw();
     long int cur   = TOUCH().getDynamicScroll();
     long int delta = cur - s_scrollBase;
 
