@@ -64,5 +64,5 @@ class PocketmageBZ {
   bool begun_ = false;
 };
 
-void setupBZ();
+void setupBZ(bool playStartup = true);
 PocketmageBZ& BZ();
