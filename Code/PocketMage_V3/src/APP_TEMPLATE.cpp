@@ -200,6 +200,12 @@ static int s_totalPages             = 0;   // sum of all s_pageCounts
 static char s_jumpBuf[5] = "";
 static int  s_jumpLen    = 0;
 
+// ── Touch scroll ──────────────────────────────────────────────────────────────
+static long int          s_scrollBase          = 0;
+static unsigned long     s_scrollCooldownUntil = 0;
+static const int         SWIPE_THRESHOLD       = 3;
+static const unsigned long SWIPE_COOLDOWN_MS   = 500;
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 static int getMaxPage() {
   return (s_displayLinesUsed <= 0) ? 0 : (s_displayLinesUsed - 1) / LINES_PER_PAGE;
@@ -807,6 +813,43 @@ void APP_INIT() {
 }
 
 void processKB_APP() {
+  // ── Touch scroll (reading mode only) ──────────────────────────────────────
+  if (appMode == MODE_READING) {
+    TOUCH().updateScrollRaw();
+    long int cur   = TOUCH().getDynamicScroll();
+    long int delta = cur - s_scrollBase;
+
+    if (millis() >= s_scrollCooldownUntil) {
+      if (delta >= SWIPE_THRESHOLD) {
+        s_scrollBase          = cur;
+        s_scrollCooldownUntil = millis() + SWIPE_COOLDOWN_MS;
+        if ((int)pageIndex < getMaxPage()) {
+          pageIndex++;
+          needsRedraw = true;
+        } else if (currentChunk + 1 < (int)chunks.size()) {
+          currentChunk++;
+          pageIndex = 0;
+          saveBookmark();
+          seamlessRestart();
+        }
+      } else if (delta <= -SWIPE_THRESHOLD) {
+        s_scrollBase          = cur;
+        s_scrollCooldownUntil = millis() + SWIPE_COOLDOWN_MS;
+        if (pageIndex > 0) {
+          pageIndex--;
+          needsRedraw = true;
+        } else if (currentChunk > 0) {
+          currentChunk--;
+          pageIndex = 65535;
+          saveBookmark();
+          seamlessRestart();
+        }
+      }
+    } else {
+      s_scrollBase = cur;  // drain accumulation during cooldown
+    }
+  }
+
   char ch = KB().updateKeypress();
   if (!ch) return;
 

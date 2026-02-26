@@ -15,6 +15,7 @@ public:
 
   // Main methods
   void updateScrollFromTouch();
+  void updateScrollRaw();          // unclamped accumulator — no allLines dependency
   bool updateScroll(int maxScroll, ulong& lineScroll);
   // getters 
   long int getDynamicScroll() const { return dynamicScroll_; }

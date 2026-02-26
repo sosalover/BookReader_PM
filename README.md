@@ -65,24 +65,21 @@ On relaunch, the reader resumes from your bookmark.
 |------|--------|
 | `<` | Previous page |
 | `>` | Next page |
-| `FN + <` | Previous chunk |
-| `FN + >` | Next chunk |
-| `b` | Save bookmark & return to book picker |
-| `A` | Save bookmark & return to OS |
-
+| `FN + <` | Previous chunk (section) |
+| `FN + >` | Next chunk (section) |
+| `g` | Jump to page — type a number, confirm with `Space` / `Enter`, cancel with `ESC` |
+| `b` / `B` | Save bookmark & return to book picker |
+| `A` / `ESC` | Save bookmark & return to OS |
+| Touch strip | Swipe right → next page, swipe left → previous page |
 
 ---
 
 # Development Notes
 
-- Chunk-based loading prevents memory crashes
-- It's a little hacky that we keep restarting, but it' a result of mem.
+- Chunk-based loading prevents memory crashes — the device restarts between chunks to keep the heap clean.
+- Global page numbers (e.g. "Pg 42/380") shown on OLED once the index is built; cached to SD so it only runs once per book.
 
 Some todos:
 
-2. Page jump shortcut
-3. Hide chunks — user sees only pages
-4. Suppress the PM startup beep on ESP.restart() chunk nav
-5. User documentation
-6. Add page move with the scroller
+Style to match PM.
 
