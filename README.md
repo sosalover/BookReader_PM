@@ -81,6 +81,5 @@ On relaunch, the reader resumes from your bookmark.
 
 Some todos:
 
-3. Hide chunks — user sees only pages
-4. Suppress the PM startup beep on chunk nav restart
+Style to match PM.
 
