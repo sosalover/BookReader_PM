@@ -617,9 +617,9 @@ static void updateOLED() {
     snprintf(hint, sizeof(hint), "< > select  SPC open  (%d books)", s_bookCount);
     u8g2.drawStr(1, 20, hint);
   } else if (appMode == MODE_PAGE_JUMP) {
-    int maxPg = getMaxPage();
     char prompt[32];
-    snprintf(prompt, sizeof(prompt), "Go to page (1-%d):", maxPg + 1);
+    int maxPg = (s_totalPages > 0) ? s_totalPages : (getMaxPage() + 1);
+    snprintf(prompt, sizeof(prompt), "Go to page (1-%d):", maxPg);
     u8g2.drawStr(1, 9, prompt);
     u8g2.drawStr(1, 20, s_jumpBuf);
   } else {
@@ -840,6 +840,10 @@ void processKB_APP() {
 
   // ── Page jump mode ──────────────────────────────────────────────────────────
   if (appMode == MODE_PAGE_JUMP) {
+    if (ch == 18) {  // FN — needed to reach number layer
+      KB().setKeyboardState(KB().getKeyboardState() == FUNC ? NORMAL : FUNC);
+      return;
+    }
     if (ch >= '0' && ch <= '9') {
       if (s_jumpLen < 4) {
         s_jumpBuf[s_jumpLen++] = ch;
@@ -849,15 +853,45 @@ void processKB_APP() {
     } else if (ch == 13 || ch == 32) {  // Enter or Space — commit
       if (s_jumpLen > 0) {
         int target = atoi(s_jumpBuf);
-        int maxPg  = getMaxPage();
-        if (target < 1)         target = 1;
-        if (target > maxPg + 1) target = maxPg + 1;
-        pageIndex   = (ulong)(target - 1);
-        needsRedraw = true;
+        if (s_totalPages > 0 && s_numPageCounts > 0) {
+          // Global page navigation across chunks
+          if (target < 1)           target = 1;
+          if (target > s_totalPages) target = s_totalPages;
+          int offset      = 0;
+          int targetChunk = s_numPageCounts - 1;
+          int localPage   = s_pageCounts[targetChunk] - 1;
+          for (int i = 0; i < s_numPageCounts; i++) {
+            if (offset + s_pageCounts[i] >= target) {
+              targetChunk = i;
+              localPage   = target - offset - 1;
+              break;
+            }
+            offset += s_pageCounts[i];
+          }
+          if (targetChunk != currentChunk) {
+            currentChunk = targetChunk;
+            pageIndex    = (ulong)localPage;
+            appMode      = MODE_READING;
+            saveBookmark();
+            seamlessRestart();
+            return;
+          }
+          pageIndex   = (ulong)localPage;
+          needsRedraw = true;
+        } else {
+          // Fallback: local chunk pages only
+          int maxPg = getMaxPage();
+          if (target < 1)         target = 1;
+          if (target > maxPg + 1) target = maxPg + 1;
+          pageIndex   = (ulong)(target - 1);
+          needsRedraw = true;
+        }
       }
+      KB().setKeyboardState(NORMAL);
       appMode = MODE_READING;
       updateOLED();
     } else if (ch == 27 || ch == 8) {  // ESC or Backspace — cancel
+      KB().setKeyboardState(NORMAL);
       appMode = MODE_READING;
       updateOLED();
     }
